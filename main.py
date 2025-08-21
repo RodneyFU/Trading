@@ -1,152 +1,150 @@
-import pandas as pd
-import numpy as np
 import asyncio
 import logging
-import logging.handlers
-from datetime import datetime, timedelta
 import argparse
+import pandas as pd
+from datetime import datetime, timedelta
 from pathlib import Path
-from config import load_config
-from data import pre_collect_historical_data, fetch_fmp_economic_calendar
-from trading import train_short_term_model, train_medium_term_model, train_long_term_model, predict_price
-from ib_insync import IB, Forex, util
-import psutil
-import matplotlib.pyplot as plt
-from tabulate import tabulate
+import json
+import traceback  # 修正：導入標準庫 traceback
+from data import fetch_fmp_economic_calendar, pre_collect_historical_data
+from trading import execute_trade  # 假設 trading.py 包含 execute_trade
+from config import load_config  # 使用 config.py 的 load_config
 
-# 中文註釋：載入配置
-config = load_config()
-ROOT_DIR = Path(config['system_config']['root_dir'])
-REPORTS_DIR = ROOT_DIR / config['system_config']['reports_dir']
-MODEL_DIR = ROOT_DIR / config['system_config']['model_dir']
-TRADING_PARAMS = config['trading_params']
+# 設置日誌
+logging.basicConfig(
+    filename=r'C:\Trading\logs\backtest.log',
+    level=logging.DEBUG,
+    format='%(asctime)s %(levelname)s:%(message)s'
+)
 
-# 中文註釋：確保日誌目錄存在並設置日誌
-log_dir = ROOT_DIR / 'logs'
-log_dir.mkdir(parents=True, exist_ok=True)
-
-# 中文註釋：記錄路徑初始化
-print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 路徑初始化完成：ROOT_DIR={ROOT_DIR}, REPORTS_DIR={REPORTS_DIR}, MODEL_DIR={MODEL_DIR}")
-logging.info(f"Path initialization completed: ROOT_DIR={ROOT_DIR}, REPORTS_DIR={REPORTS_DIR}, MODEL_DIR={MODEL_DIR}")
-
-async def monitor_positions(ib, trades, df_1h, current_price, session):
-    """中文註釋：監控持倉並執行交易邏輯。"""
+async def run_backtest(start_date, end_date, timeframe='1 day'):
+    """執行回測，整合歷史數據、經濟日曆和情緒分析"""
     try:
-        if df_1h.empty or not all(col in df_1h.columns for col in ['close', 'RSI']):
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 數據為空或缺少必要欄位")
-            logging.error("Data is empty or missing required columns")
-            return trades
-        
-        logging.debug(f"Monitoring positions: df_1h shape={df_1h.shape}, current_price={current_price}, session={session}")
-        
-        for _, row in df_1h.iterrows():
-            if row['RSI'] > TRADING_PARAMS['rsi_overbought']:
-                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} RSI 超買，賣出信號")
-                logging.info("RSI overbought, sell signal")
-                trades.append({'type': 'sell', 'price': current_price, 'time': datetime.now()})
-            elif row['RSI'] < TRADING_PARAMS['rsi_oversold']:
-                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} RSI 超賣，買入信號")
-                logging.info("RSI oversold, buy signal")
-                trades.append({'type': 'buy', 'price': current_price, 'time': datetime.now()})
-        return trades
-    except Exception as e:
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 監控持倉失敗：{str(e)}")
-        logging.error(f"Failed to monitor positions: {str(e)}, traceback={util.format_exc()}")
-        return trades
+        config = load_config()
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 開始回測：{start_date} 至 {end_date}")
+        logging.info(f"Starting backtest: {start_date} to {end_date}, timeframe={timeframe}")
 
-async def run_backtest(start_date, end_date):
-    """中文註釋：執行回測流程。"""
-    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 開始回測：{start_date} 至 {end_date}")
-    logging.info(f"[BACKTEST] Starting backtest: start_date={start_date}, end_date={end_date}")
-    
-    try:
-        logging.info("[BACKTEST] Fetching economic calendar...")
+        # 獲取經濟日曆
         economic_calendar = fetch_fmp_economic_calendar(start_date, end_date, config)
-        logging.info(f"[BACKTEST] Economic calendar fetched: shape={economic_calendar.shape if not economic_calendar.empty else 'empty'}")
-        
-        logging.info("[BACKTEST] Collecting 1h historical data...")
-        df_1h = await pre_collect_historical_data('1 hour', '30d', start_date, end_date, config)
-        logging.info(f"[BACKTEST] 1h data collected: shape={df_1h.shape if not df_1h.empty else 'empty'}")
-        
-        logging.info("[BACKTEST] Collecting 4h historical data...")
-        df_4h = await pre_collect_historical_data('4 hours', '30d', start_date, end_date, config)
-        logging.info(f"[BACKTEST] 4h data collected: shape={df_4h.shape if not df_4h.empty else 'empty'}")
-        
-        logging.info("[BACKTEST] Collecting 1d historical data...")
-        df_1d = await pre_collect_historical_data('1 day', '30d', start_date, end_date, config)
-        logging.info(f"[BACKTEST] 1d data collected: shape={df_1d.shape if not df_1d.empty else 'empty'}")
-        
-        if df_1h.empty or df_4h.empty or df_1d.empty:
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 歷史數據為空，無法進行回測")
-            logging.error("[BACKTEST] Historical data is empty, cannot proceed with backtest")
-            return
-        
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 正在訓練短期模型...")
-        short_term_model = train_short_term_model(df_1h)
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 正在訓練中期模型...")
-        medium_term_model = train_medium_term_model(df_4h)
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 正在訓練長期模型...")
-        long_term_model = train_long_term_model(df_1d)
-        
+        if economic_calendar.empty:
+            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 警告：經濟日曆為空")
+            logging.warning("Economic calendar is empty")
+
+        # 獲取歷史數據和技術指標
+        df = await pre_collect_historical_data(timeframe, '6mo', start_date, end_date, config)
+        if df.empty or len(df) < 100:
+            raise ValueError(f"歷史數據不足：{len(df)} 行，需至少 100 行")
+
+        # 合併經濟日曆
+        df = df.merge(economic_calendar[['date', 'event', 'impact']], on='date', how='left')
+        df['impact'] = df['impact'].fillna('Low')
+
+        # 生成交易信號（結合技術指標和情緒分析）
+        df['signal'] = df.apply(
+            lambda x: 'BUY' if (x['RSI'] < 30 and x['sentiment'] > 0.3 and x['impact'] != 'High')
+            else 'SELL' if (x['RSI'] > 70 and x['sentiment'] < -0.3 and x['impact'] != 'High')
+            else 'HOLD', axis=1
+        )
+
+        # 模擬交易
         trades = []
-        session = None
-        trades = await monitor_positions(None, trades, df_1h, df_1h['close'].iloc[-1], session)
-        
-        report = pd.DataFrame(trades)
-        report.to_csv(REPORTS_DIR / 'backtest_report.csv', index=False)
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 回測報告已生成：{REPORTS_DIR / 'backtest_report.csv'}")
-        logging.info(f"[BACKTEST] Backtest report generated: {REPORTS_DIR / 'backtest_report.csv'}")
-        
+        position = None
+        for i in range(1, len(df)):
+            if df['signal'].iloc[i] == 'BUY' and position != 'BUY':
+                trades.append({
+                    'date': df['date'].iloc[i],
+                    'type': 'BUY',
+                    'price': df['close'].iloc[i],
+                    'sentiment': df['sentiment'].iloc[i]
+                })
+                position = 'BUY'
+            elif df['signal'].iloc[i] == 'SELL' and position != 'SELL':
+                trades.append({
+                    'date': df['date'].iloc[i],
+                    'type': 'SELL',
+                    'price': df['close'].iloc[i],
+                    'sentiment': df['sentiment'].iloc[i]
+                })
+                position = 'SELL'
+
+        # 保存回測結果
+        trades_df = pd.DataFrame(trades)
+        reports_dir = Path(config['system_config']['root_dir']) / 'reports'
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        trades_df.to_csv(reports_dir / f'backtest_{start_date}_{end_date}.csv', index=False)
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 回測完成，結果已保存至 {reports_dir}")
+        logging.info(f"Backtest completed, results saved to {reports_dir}")
+
+        return trades_df
+
     except Exception as e:
         print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 回測失敗：{str(e)}")
-        logging.error(f"[BACKTEST] Backtest failed: {str(e)}, traceback={util.format_exc()}")
-        
-async def run_live_trading():
-    """中文註釋：執行實盤交易流程。"""
-    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 開始實盤交易...")
-    logging.info("[LIVE] Starting live trading...")
-    ib = IB()
-    try:
-        ib.connect('127.0.0.1', config['system_config']['ib_params']['port'], clientId=1)
-        while True:
-            df_1h = await pre_collect_historical_data('1 hour', '1d')
-            if not df_1h.empty:
-                trades = []
-                trades = await monitor_positions(ib, trades, df_1h, df_1h['close'].iloc[-1], ib)
-            await asyncio.sleep(60)
-    except Exception as e:
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 實盤交易失敗：{str(e)}")
-        logging.error(f"[LIVE] Live trading failed: {str(e)}, traceback={util.format_exc()}")
-    finally:
-        ib.disconnect()
+        logging.error(f"[BACKTEST] Backtest failed: {str(e)}, traceback={traceback.format_exc()}")  # 修正：使用 traceback.format_exc
+        raise
+
+async def run_live_trading(timeframe='1 hour'):
+    """執行實盤交易，每 3 小時保存數據"""
+    config = load_config()
+    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 開始實盤交易，時間框架：{timeframe}")
+    logging.info(f"Starting live trading, timeframe={timeframe}")
+
+    while True:
+        try:
+            end_date = datetime.now().strftime('%Y-%m-%d')
+            start_date = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+            df = await pre_collect_historical_data(timeframe, '7d', start_date, end_date, config)
+            if df.empty:
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 無有效數據，等待下一次更新")
+                logging.warning("No valid data for live trading")
+                await asyncio.sleep(3600)  # 等待 1 小時
+                continue
+
+            # 獲取最新經濟日曆
+            economic_calendar = fetch_fmp_economic_calendar(start_date, end_date, config)
+            df = df.merge(economic_calendar[['date', 'event', 'impact']], on='date', how='left')
+            df['impact'] = df['impact'].fillna('Low')
+
+            # 生成交易信號
+            latest = df.iloc[-1]
+            signal = 'BUY' if (latest['RSI'] < 30 and latest['sentiment'] > 0.3 and latest['impact'] != 'High') \
+                else 'SELL' if (latest['RSI'] > 70 and latest['sentiment'] < -0.3 and latest['impact'] != 'High') \
+                else 'HOLD'
+
+            # 執行交易
+            if signal != 'HOLD':
+                execute_trade(signal, latest['close'], config)  # 假設 trading.py 提供此函數
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 執行交易：{signal} at {latest['close']}")
+                logging.info(f"Executed trade: {signal} at {latest['close']}")
+
+            # 每 3 小時保存數據
+            await asyncio.sleep(3 * 3600)
+            save_path = Path(config['system_config']['db_path'])
+            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 保存數據至 {save_path}")
+            logging.info(f"Saving data to SQLite: {save_path}")
+
+        except Exception as e:
+            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 實盤交易錯誤：{str(e)}")
+            logging.error(f"[LIVE] Trading error: {str(e)}, traceback={traceback.format_exc()}")
+            await asyncio.sleep(600)  # 等待 10 分鐘後重試
+
+def main():
+    """主程式入口，解析命令列參數"""
+    parser = argparse.ArgumentParser(description='USD/JPY Trading System')
+    parser.add_argument('--backtest', action='store_true', help='Run backtest')
+    parser.add_argument('--live', action='store_true', help='Run live trading')
+    parser.add_argument('--start', default=(datetime.now() - timedelta(days=180)).strftime('%Y-%m-%d'), help='Start date')
+    parser.add_argument('--end', default=datetime.now().strftime('%Y-%m-%d'), help='End date')
+    parser.add_argument('--timeframe', default='1 day', choices=['1 hour', '4 hours', '1 day'], help='Timeframe')
+    
+    args = parser.parse_args()
+
+    if args.backtest:
+        asyncio.run(run_backtest(args.start, args.end, args.timeframe))
+    elif args.live:
+        asyncio.run(run_live_trading(args.timeframe))
+    else:
+        print("請指定 --backtest 或 --live")
+        logging.error("No mode specified (--backtest or --live)")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="USD/JPY 交易系統")
-    parser.add_argument('--backtest', action='store_true', help='執行回測')
-    parser.add_argument('--start', type=str, help='回測開始日期 (YYYY-MM-DD)')
-    parser.add_argument('--end', type=str, help='回測結束日期 (YYYY-MM-DD)')
-    parser.add_argument('--y', type=int, help='回測年數')
-    args = parser.parse_args()
-    
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    
-    # 中文註釋：動態選擇日誌檔案並配置旋轉
-    if args.backtest:
-        log_file = log_dir / 'backtest.log'
-    else:
-        log_file = log_dir / 'live_trading.log'
-    if not log_file.is_file():
-        with open(log_file, 'a', encoding='utf-8') as f:
-            f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 日誌檔案初始化\n")
-    handler = logging.handlers.RotatingFileHandler(log_file, maxBytes=10*1024*1024, backupCount=5)
-    handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(module)s - %(message)s'))
-    logging.getLogger().addHandler(handler)
-    logging.getLogger().setLevel(logging.DEBUG)
-    
-    if args.backtest:
-        start_date = args.start or (datetime.now() - timedelta(days=args.y * 365 if args.y else 100)).strftime('%Y-%m-%d')
-        end_date = args.end or datetime.now().strftime('%Y-%m-%d')
-        asyncio.run(run_backtest(start_date, end_date))
-    else:
-        asyncio.run(run_live_trading())
+    main()

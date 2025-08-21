@@ -236,7 +236,7 @@ def load_cached_data(timeframe: str, period: str, start_date: str, end_date: str
             df.to_pickle(cache_file)
             save_to_database(df, timeframe, config)
             year = datetime.now().strftime('%Y')
-            backup_dir = DATA_DIR / 'backtest' / year
+            backup_dir = DATA_DIR / 'backup' / year
             backup_dir.mkdir(parents=True, exist_ok=True)
             current_date = datetime.now().strftime('%Y%m%d')
             df.to_pickle(backup_dir / f'USDJPY_{timeframe}_{current_date}.pkl')
@@ -417,7 +417,7 @@ def calculate_technical_indicators(df: pd.DataFrame, config) -> pd.DataFrame:
 
 @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=4, max=10))
 def fetch_fmp_economic_calendar(start_date: str, end_date: str, config) -> pd.DataFrame:
-    """中文註釋：從 FMP API 獲取經濟事件日曆"""
+    """中文註釋：從 FMP API 獲取經濟事件日曆，若失敗則載入本地檔案"""
     FMP_API_KEY = config['api_keys']['fmp_api_key']
     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 正在從 FMP 獲取經濟事件日曆...")
     logging.info(f"Fetching FMP economic calendar: start={start_date}, end={end_date}, api_key_masked={FMP_API_KEY[:5]}...")
@@ -429,12 +429,12 @@ def fetch_fmp_economic_calendar(start_date: str, end_date: str, config) -> pd.Da
         if not isinstance(response, list) or not response:
             print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 經濟事件日曆為空或格式錯誤")
             logging.warning(f"FMP economic calendar non-list or empty: {response}")
-            return pd.DataFrame()
+            raise Exception("FMP data empty or invalid")
         df = pd.DataFrame(response)
         if 'date' not in df.columns:
             print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 經濟事件日曆缺少 'date' 欄位")
             logging.error(f"FMP economic calendar missing 'date' column, available_columns={df.columns.tolist()}")
-            return pd.DataFrame()
+            raise Exception("Missing 'date' column")
         df['date'] = pd.to_datetime(df['date'])
         df = df[['date', 'event', 'impact']]
         print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 經濟事件日曆獲取成功")
@@ -451,7 +451,12 @@ def fetch_fmp_economic_calendar(start_date: str, end_date: str, config) -> pd.Da
                 print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 已創建空經濟事件日曆：{calendar_path}")
                 logging.info(f"Created empty economic calendar: {calendar_path}")
             df = pd.read_csv(calendar_path)
+            if df.empty or not all(col in df.columns for col in ['date', 'event', 'impact']):
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 本地經濟事件日曆無效或為空")
+                logging.error(f"Local economic calendar invalid or empty: shape={df.shape}, columns={df.columns.tolist()}")
+                return pd.DataFrame()
             df['date'] = pd.to_datetime(df['date'])
+            df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
             print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 本地經濟事件日曆載入成功")
             logging.info(f"Successfully loaded local economic calendar: shape={df.shape}, columns={df.columns.tolist()}")
             return df

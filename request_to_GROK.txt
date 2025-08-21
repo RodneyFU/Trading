@@ -5,6 +5,13 @@
 中文註釋：為每個函數和關鍵邏輯添加中文註釋，提升可讀性和維護性。
 程式碼與 Markdown 文件內容的矛盾（如參數值、檔案清單、路徑等）以程式碼為準。
 
+---------
+最UPDATE的程式碼
+https://raw.githubusercontent.com/RodneyFU/Trading/refs/heads/main/config.py
+https://raw.githubusercontent.com/RodneyFU/Trading/refs/heads/main/data.py
+https://raw.githubusercontent.com/RodneyFU/Trading/refs/heads/main/main.py
+https://raw.githubusercontent.com/RodneyFU/Trading/refs/heads/main/trading.py
+---------
 debug如發現有原因試檢查所有程式碼是不有相同錯誤
 ---------
 關於GROK建議修改程式碼內容時應注意以下幾點:

@@ -13,9 +13,10 @@ import urllib.request
 import traceback
 import os
 import pickle
+from textblob import TextBlob
 
 def initialize_database(config):
-    """中文註釋：初始化 SQLite 資料庫，創建 OHLC 和指標表格"""
+    """中文註釋：初始化 SQLite 資料庫，創建 OHLC、指標和經濟數據表格"""
     DATA_DIR = Path(config['system_config']['root_dir']) / 'data'
     DB_PATH = DATA_DIR / 'trading_data.db'
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -40,6 +41,14 @@ def initialize_database(config):
             indicator TEXT,
             value REAL,
             PRIMARY KEY (date, timeframe, indicator)
+        )
+    ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS economic_data (
+            date TEXT,
+            series_id TEXT,
+            value REAL,
+            PRIMARY KEY (date, series_id)
         )
     ''')
     conn.commit()
@@ -82,37 +91,53 @@ def clean_invalid_models(config):
         print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 模型清理失敗：{str(e)}")
         logging.error(f"Failed to clean invalid models: {str(e)}, traceback={traceback.format_exc()}")
 
-def get_system_proxy():
-    """中文註釋：獲取系統 Proxy 設定並測試連線"""
+def get_system_proxy(config):
+    """中文註釋：獲取系統 Proxy 設定或配置檔案中的 Proxy，並測試連線"""
     try:
-        proxies = urllib.request.getproxies()
-        if proxies.get('http'):
+        # 優先檢查 config 中的 Proxy 設置
+        proxies = config['system_config'].get('proxies', {})
+        if not proxies:
+            proxies = urllib.request.getproxies()
+        
+        if proxies.get('http') or proxies.get('https'):
+            test_url = 'https://api.stlouisfed.org/fred/series/observations?series_id=FEDFUNDS&api_key=TEST&file_type=json'
             try:
-                response = requests.get('https://www.google.com', proxies=proxies, timeout=5)
+                response = requests.get(test_url, proxies=proxies, timeout=5)
                 logging.debug(f"Proxy test successful: {proxies}")
             except Exception as e:
                 print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Proxy 測試失敗：{str(e)}")
                 logging.warning(f"Proxy test failed: {proxies}, error={str(e)}")
-                proxies = {}
-        logging.debug(f"Detected system proxies: {proxies}")
+                proxies = {}  # 測試失敗時禁用 Proxy
+        logging.debug(f"Detected proxies: {proxies}")
         return proxies
     except Exception as e:
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 獲取系統 Proxy 失敗：{str(e)}")
-        logging.error(f"Failed to get system proxies: {str(e)}, traceback={traceback.format_exc()}")
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 獲取 Proxy 失敗：{str(e)}")
+        logging.error(f"Failed to get proxies: {str(e)}, traceback={traceback.format_exc()}")
         return {}
+
+def filter_future_dates(df: pd.DataFrame) -> pd.DataFrame:
+    """中文註釋：過濾掉未來日期的數據，確保數據不包含當前日期之後的記錄"""
+    current_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    if not df.empty and 'date' in df.columns:
+        initial_rows = len(df)
+        df = df[df['date'] <= current_date].copy()
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 已過濾未來日期，初始行數={initial_rows}，剩餘行數={len(df)}")
+        logging.info(f"Filtered future dates, initial_rows={initial_rows}, remaining_rows={len(df)}, shape={df.shape}")
+    return df
 
 @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=4, max=10))
 def fetch_yahoo_finance_data(timeframe: str, period: str, start_date: str = None, end_date: str = None) -> pd.DataFrame:
     """中文註釋：從 Yahoo Finance 獲取 USD/JPY 歷史數據"""
     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 正在從 Yahoo Finance 獲取 {timeframe} 數據...")
     try:
-        proxies = get_system_proxy()
+        config = load_config()
+        proxies = get_system_proxy(config)
         if proxies.get('http') or proxies.get('https'):
             os.environ['HTTP_PROXY'] = proxies.get('http', '')
             os.environ['HTTPS_PROXY'] = proxies.get('https', '')
-            logging.info(f"Using system proxies for yfinance: HTTP={proxies.get('http')}, HTTPS={proxies.get('https')}")
+            logging.info(f"Using proxies for yfinance: HTTP={proxies.get('http')}, HTTPS={proxies.get('https')}")
         else:
-            logging.debug("No system proxies detected for yfinance")
+            logging.debug("No proxies detected for yfinance")
         
         ticker = 'USDJPY=X'
         df = yf.download(ticker, period=period, interval=timeframe, start=start_date, end=end_date)
@@ -123,6 +148,7 @@ def fetch_yahoo_finance_data(timeframe: str, period: str, start_date: str = None
         df.reset_index(inplace=True)
         df.rename(columns={'Date': 'date', 'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'}, inplace=True)
         df['date'] = pd.to_datetime(df['date'])
+        df = filter_future_dates(df)
         print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Yahoo Finance 數據獲取成功")
         logging.info(f"Successfully fetched data from Yahoo Finance, shape={df.shape}, columns={df.columns.tolist()}")
         return df[['date', 'open', 'high', 'low', 'close', 'volume']]
@@ -141,7 +167,7 @@ def fetch_fmp_data(timeframe: str, start_date: str, end_date: str, config) -> pd
     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 正在從 FMP 獲取 {timeframe} 數據...")
     logging.info(f"Fetching FMP data: timeframe={timeframe}, start={start_date}, end={end_date}, api_key_masked={FMP_API_KEY[:5]}...")
     try:
-        proxies = get_system_proxy()
+        proxies = get_system_proxy(config)
         tf_map = {'1 hour': '1hour', '4 hours': '4hour', '1 day': '1day'}
         url = f"https://financialmodelingprep.com/api/v3/historical-price-full/USDJPY?from={start_date}&to={end_date}&timeseries={tf_map[timeframe]}&apikey={FMP_API_KEY}"
         response = requests.get(url, proxies=proxies, timeout=10).json()
@@ -154,12 +180,97 @@ def fetch_fmp_data(timeframe: str, start_date: str, end_date: str, config) -> pd
         df = pd.DataFrame(data)
         df.rename(columns={'date': 'date', 'open': 'open', 'high': 'high', 'low': 'low', 'close': 'close', 'volume': 'volume'}, inplace=True)
         df['date'] = pd.to_datetime(df['date'])
+        df = filter_future_dates(df)
         print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 數據獲取成功")
         logging.info(f"Successfully fetched FMP data: shape={df.shape}, columns={df.columns.tolist()}")
         return df[['date', 'open', 'high', 'low', 'close', 'volume']]
     except Exception as e:
         print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 數據獲取失敗：{str(e)}")
         logging.error(f"Failed to fetch FMP data: {str(e)}, traceback={traceback.format_exc()}, proxies={proxies}, url={url}")
+        return pd.DataFrame()
+
+@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=4, max=10))
+def fetch_fred_data(series_id: str, start_date: str, end_date: str, config) -> pd.DataFrame:
+    """中文註釋：從 FRED API 獲取經濟數據（如聯邦基金利率）"""
+    FRED_API_KEY = config['api_keys'].get('fred_api_key', '')
+    if not FRED_API_KEY:
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FRED API 鍵未配置")
+        logging.error("FRED API key not configured")
+        return pd.DataFrame()
+    
+    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 正在從 FRED 獲取 {series_id} 數據...")
+    logging.info(f"Fetching FRED data: series_id={series_id}, start={start_date}, end={end_date}, api_key_masked={FRED_API_KEY[:5]}...")
+    try:
+        proxies = get_system_proxy(config)
+        url = f"https://api.stlouisfed.org/fred/series/observations"
+        params = {
+            'series_id': series_id,
+            'api_key': FRED_API_KEY,
+            'file_type': 'json',
+            'observation_start': start_date,
+            'observation_end': end_date
+        }
+        response = requests.get(url, params=params, proxies=proxies, timeout=10).json()
+        logging.debug(f"FRED response type={type(response)}, content_preview={str(response)[:200]}, proxies={proxies}, url={url}")
+        if 'observations' not in response or not response['observations']:
+            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FRED 數據為空或格式錯誤")
+            logging.warning(f"FRED data empty or invalid: {response}, series_id={series_id}")
+            return pd.DataFrame()
+        df = pd.DataFrame(response['observations'])
+        df['date'] = pd.to_datetime(df['date'])
+        df['value'] = pd.to_numeric(df['value'], errors='coerce')
+        df = df[['date', 'value']].rename(columns={'value': series_id})
+        df = filter_future_dates(df)
+        # 內插到日線數據
+        if not df.empty:
+            df.set_index('date', inplace=True)
+            df = df.resample('D').ffill().reset_index()
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FRED 數據獲取成功：{series_id}")
+        logging.info(f"Successfully fetched FRED data: series_id={series_id}, shape={df.shape}, columns={df.columns.tolist()}")
+        return df
+    except Exception as e:
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FRED 數據獲取失敗：{str(e)}")
+        logging.error(f"Failed to fetch FRED data: {str(e)}, traceback={traceback.format_exc()}, series_id={series_id}, proxies={proxies}, url={url}")
+        return pd.DataFrame()
+
+@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=4, max=10))
+def fetch_x_data(query: str, start_date: str, end_date: str, config) -> pd.DataFrame:
+    """中文註釋：從 X API 獲取與查詢相關的推文數據"""
+    X_BEARER_TOKEN = config['api_keys'].get('x_bearer_token', '')
+    if not X_BEARER_TOKEN:
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} X Bearer Token 未配置")
+        logging.error("X Bearer Token not configured")
+        return pd.DataFrame()
+    
+    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 正在從 X API 獲取推文數據：{query}")
+    logging.info(f"Fetching X data: query={query}, start={start_date}, end={end_date}, token_masked={X_BEARER_TOKEN[:5]}...")
+    try:
+        proxies = get_system_proxy(config)
+        url = "https://api.twitter.com/2/tweets/search/recent"
+        headers = {"Authorization": f"Bearer {X_BEARER_TOKEN}"}
+        params = {
+            'query': f"{query} lang:en",
+            'start_time': start_date,
+            'end_time': end_date,
+            'max_results': 100
+        }
+        response = requests.get(url, headers=headers, params=params, proxies=proxies, timeout=10).json()
+        logging.debug(f"X API response type={type(response)}, content_preview={str(response)[:200]}, proxies={proxies}, url={url}")
+        if 'data' not in response or not response['data']:
+            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} X API 數據為空或格式錯誤")
+            logging.warning(f"X API data empty or invalid: {response}, query={query}")
+            return pd.DataFrame()
+        df = pd.DataFrame(response['data'])
+        df['created_at'] = pd.to_datetime(df['created_at'])
+        df = df[['created_at', 'text']].rename(columns={'created_at': 'date'})
+        df['sentiment'] = df['text'].apply(lambda x: TextBlob(x).sentiment.polarity)
+        df = filter_future_dates(df)
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} X API 數據獲取成功")
+        logging.info(f"Successfully fetched X data: query={query}, shape={df.shape}, columns={df.columns.tolist()}")
+        return df
+    except Exception as e:
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} X API 數據獲取失敗：{str(e)}")
+        logging.error(f"Failed to fetch X data: {str(e)}, traceback={traceback.format_exc()}, query={query}, proxies={proxies}, url={url}")
         return pd.DataFrame()
 
 def load_from_database(timeframe: str, start_date: str, end_date: str, config) -> pd.DataFrame:
@@ -173,6 +284,7 @@ def load_from_database(timeframe: str, start_date: str, end_date: str, config) -
         conn.close()
         if not df.empty:
             df['date'] = pd.to_datetime(df['date'])
+            df = filter_future_dates(df)
             print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 從資料庫載入 {timeframe} 數據成功")
             logging.info(f"Successfully loaded {timeframe} data from database, shape={df.shape}, columns={df.columns.tolist()}")
             return df[['date', 'open', 'high', 'low', 'close', 'volume']]
@@ -187,7 +299,9 @@ def save_to_database(df: pd.DataFrame, timeframe: str, config):
     DB_PATH = Path(config['system_config']['root_dir']) / 'data' / 'trading_data.db'
     try:
         conn = sqlite3.connect(DB_PATH)
-        df.to_sql('ohlc', conn, if_exists='append', index=False)
+        df_to_save = df[['date', 'open', 'high', 'low', 'close', 'volume', 'timeframe']].copy()
+        df_to_save['timeframe'] = timeframe
+        df_to_save.to_sql('ohlc', conn, if_exists='append', index=False)
         conn.commit()
         conn.close()
         print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 數據已儲存到資料庫：{timeframe}")
@@ -196,6 +310,25 @@ def save_to_database(df: pd.DataFrame, timeframe: str, config):
     except Exception as e:
         print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 資料庫儲存失敗：{str(e)}")
         logging.error(f"Failed to save data to database: {str(e)}, traceback={traceback.format_exc()}")
+        return False
+
+def save_fred_to_database(df: pd.DataFrame, series_id: str, config):
+    """中文註釋：將 FRED 數據儲存到 SQLite 資料庫"""
+    DB_PATH = Path(config['system_config']['root_dir']) / 'data' / 'trading_data.db'
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        df_to_save = df[['date', series_id]].copy()
+        df_to_save['series_id'] = series_id
+        df_to_save = df_to_save.rename(columns={series_id: 'value'})
+        df_to_save.to_sql('economic_data', conn, if_exists='append', index=False)
+        conn.commit()
+        conn.close()
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FRED 數據已儲存到資料庫：{series_id}")
+        logging.info(f"FRED data saved to database: {series_id}, shape={df.shape}")
+        return True
+    except Exception as e:
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FRED 數據儲存失敗：{str(e)}")
+        logging.error(f"Failed to save FRED data to database: {str(e)}, traceback={traceback.format_exc()}")
         return False
 
 def load_cached_data(timeframe: str, period: str, start_date: str, end_date: str, config) -> pd.DataFrame:
@@ -236,7 +369,7 @@ def load_cached_data(timeframe: str, period: str, start_date: str, end_date: str
             df.to_pickle(cache_file)
             save_to_database(df, timeframe, config)
             year = datetime.now().strftime('%Y')
-            backup_dir = DATA_DIR / 'backup' / year
+            backup_dir = DATA_DIR / 'backtest' / year
             backup_dir.mkdir(parents=True, exist_ok=True)
             current_date = datetime.now().strftime('%Y%m%d')
             df.to_pickle(backup_dir / f'USDJPY_{timeframe}_{current_date}.pkl')
@@ -268,7 +401,7 @@ def load_cached_indicators(timeframe: str, config) -> pd.DataFrame:
                 return pd.DataFrame()
             mtime = datetime.fromtimestamp(cache_file.stat().st_mtime)
             cache_duration = {'1 hour': 24, '4 hours': 48, '1 day': 168}
-            if (datetime.now() - mtime).total_seconds() / 3600 < cache_duration.get(timeframe, 24):
+            if (datetime.now().strftime('%Y-%m-%d %H:%M:%S') - mtime).total_seconds() / 3600 < cache_duration.get(timeframe, 24):
                 print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 從快取載入 {timeframe} 技術指標")
                 logging.info(f"Loaded {timeframe} indicators from cache, shape={df.shape}, columns={df.columns.tolist()}")
                 return df
@@ -308,17 +441,22 @@ def fetch_fmp_indicators(timeframe: str, start_date: str, end_date: str, config)
     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 正在從 FMP 獲取 {timeframe} 技術指標...")
     logging.info(f"Fetching FMP indicators: timeframe={timeframe}, start={start_date}, end={end_date}, api_key_masked={FMP_API_KEY[:5]}...")
     try:
-        proxies = get_system_proxy()
+        proxies = get_system_proxy(config)
         tf_map = {'1 hour': '1hour', '4 hours': '4hour', '1 day': '1day'}
         url = f"https://financialmodelingprep.com/api/v3/technical_indicator/{tf_map[timeframe]}/USDJPY?from={start_date}&to={end_date}&apikey={FMP_API_KEY}"
         response = requests.get(url, proxies=proxies, timeout=10).json()
         logging.debug(f"FMP indicators response type={type(response)}, content_preview={str(response)[:200]}, proxies={proxies}, url={url}")
+        if 'error' in response.lower():
+            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 技術指標請求失敗：{response}")
+            logging.error(f"FMP indicators request failed: {response}")
+            return pd.DataFrame()
         df = pd.DataFrame(response)
         if df.empty:
             print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 技術指標為空")
             logging.warning(f"FMP returned empty indicators for timeframe={timeframe}")
             return pd.DataFrame()
         df['date'] = pd.to_datetime(df['date'])
+        df = filter_future_dates(df)
         print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 技術指標獲取成功")
         logging.info(f"Successfully fetched indicators from FMP: shape={df.shape}, columns={df.columns.tolist()}")
         return df
@@ -336,7 +474,6 @@ def compute_indicators(df: pd.DataFrame, config) -> pd.DataFrame:
             logging.error(f"Input DataFrame missing required columns, df_shape={df.shape}, available_columns={df.columns.tolist()}")
             return df
         
-        # 驗證配置鍵
         required_indicators = ['RSI', 'MACD', 'ATR', 'Stochastic', 'Bollinger', 'EMA']
         for indicator in required_indicators:
             if indicator not in INDICATORS:
@@ -417,15 +554,19 @@ def calculate_technical_indicators(df: pd.DataFrame, config) -> pd.DataFrame:
 
 @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=4, max=10))
 def fetch_fmp_economic_calendar(start_date: str, end_date: str, config) -> pd.DataFrame:
-    """中文註釋：從 FMP API 獲取經濟事件日曆，若失敗則載入本地檔案"""
+    """中文註釋：從 FMP API 獲取經濟事件日曆，若失敗則載入本地檔案或使用 FRED 替代"""
     FMP_API_KEY = config['api_keys']['fmp_api_key']
     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 正在從 FMP 獲取經濟事件日曆...")
     logging.info(f"Fetching FMP economic calendar: start={start_date}, end={end_date}, api_key_masked={FMP_API_KEY[:5]}...")
     try:
-        proxies = get_system_proxy()
+        proxies = get_system_proxy(config)
         url = f"https://financialmodelingprep.com/api/v3/economic-calendar?from={start_date}&to={end_date}&apikey={FMP_API_KEY}"
         response = requests.get(url, proxies=proxies, timeout=10).json()
         logging.debug(f"FMP response type={type(response)}, content_preview={str(response)[:200]}, proxies={proxies}, url={url}")
+        if isinstance(response, dict) and 'Error Message' in response:
+            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 經濟日曆請求失敗：{response['Error Message']}")
+            logging.error(f"FMP economic calendar request failed: {response['Error Message']}")
+            raise Exception(f"FMP error: {response['Error Message']}")
         if not isinstance(response, list) or not response:
             print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 經濟事件日曆為空或格式錯誤")
             logging.warning(f"FMP economic calendar non-list or empty: {response}")
@@ -437,12 +578,28 @@ def fetch_fmp_economic_calendar(start_date: str, end_date: str, config) -> pd.Da
             raise Exception("Missing 'date' column")
         df['date'] = pd.to_datetime(df['date'])
         df = df[['date', 'event', 'impact']]
+        df = filter_future_dates(df)
         print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 經濟事件日曆獲取成功")
         logging.info(f"Successfully fetched economic calendar from FMP: shape={df.shape}, columns={df.columns.tolist()}")
         return df
     except Exception as e:
         print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 經濟事件日曆獲取失敗：{str(e)}")
         logging.error(f"Failed to fetch FMP economic calendar: {str(e)}, traceback={traceback.format_exc()}, proxies={proxies}, url={url}")
+        # 嘗試使用 FRED 經濟日曆作為替代
+        try:
+            fred_df = fetch_fred_data('ECI', start_date, end_date, config)
+            if not fred_df.empty:
+                fred_df = fred_df.rename(columns={'ECI': 'event_value'})
+                fred_df['event'] = 'Economic Indicator (ECI)'
+                fred_df['impact'] = 'Medium'
+                fred_df = fred_df[['date', 'event', 'impact']]
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FRED 經濟日曆替代成功")
+                logging.info(f"Successfully used FRED ECI as economic calendar fallback: shape={fred_df.shape}")
+                return fred_df
+        except Exception as fred_e:
+            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FRED 經濟日曆替代失敗：{str(fred_e)}")
+            logging.error(f"Failed to fetch FRED ECI as fallback: {str(fred_e)}, traceback={traceback.format_exc()}")
+        # 最後嘗試本地檔案
         try:
             calendar_path = Path(config['system_config']['economic_calendar_path'])
             if not calendar_path.exists():
@@ -457,6 +614,7 @@ def fetch_fmp_economic_calendar(start_date: str, end_date: str, config) -> pd.Da
                 return pd.DataFrame()
             df['date'] = pd.to_datetime(df['date'])
             df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
+            df = filter_future_dates(df)
             print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 本地經濟事件日曆載入成功")
             logging.info(f"Successfully loaded local economic calendar: shape={df.shape}, columns={df.columns.tolist()}")
             return df
@@ -472,10 +630,14 @@ async def pre_collect_historical_data(timeframe: str, period: str, start_date: s
     """中文註釋：預先收集歷史數據並計算技術指標，確保回測期間至少為配置的最小天數"""
     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 正在預收集 {timeframe} 歷史數據...")
     try:
-        # 檢查並調整回測天數
+        if config is None:
+            config = load_config()
+        
+        # 確保最小回測期間
         min_days = config['system_config'].get('min_backtest_days', 180)
+        current_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         if not end_date:
-            end_date = datetime.now().strftime('%Y-%m-%d')
+            end_date = current_date.strftime('%Y-%m-%d')
         if not start_date:
             start_date = (pd.to_datetime(end_date) - timedelta(days=min_days)).strftime('%Y-%m-%d')
         
@@ -483,6 +645,11 @@ async def pre_collect_historical_data(timeframe: str, period: str, start_date: s
         try:
             end_date_dt = pd.to_datetime(end_date)
             start_date_dt = pd.to_datetime(start_date)
+            if end_date_dt > current_date:
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 結束日期 {end_date} 為未來日期，調整為當前日期 {current_date.strftime('%Y-%m-%d')}")
+                logging.warning(f"End date {end_date} is in the future, adjusting to {current_date.strftime('%Y-%m-%d')}")
+                end_date_dt = current_date
+                end_date = end_date_dt.strftime('%Y-%m-%d')
             date_diff = (end_date_dt - start_date_dt).days
             if date_diff < min_days:
                 print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 回測期間太短：{date_diff} 天，自動調整到 {min_days} 天")
@@ -493,10 +660,9 @@ async def pre_collect_historical_data(timeframe: str, period: str, start_date: s
         except Exception as e:
             print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 日期格式錯誤：{str(e)}，使用預設 {min_days} 天")
             logging.error(f"Invalid date format: {str(e)}, using default {min_days} days")
-            end_date = datetime.now().strftime('%Y-%m-%d')
+            end_date = current_date.strftime('%Y-%m-%d')
             start_date = (pd.to_datetime(end_date) - timedelta(days=min_days)).strftime('%Y-%m-%d')
         
-        # 清理無效模型
         clean_invalid_models(config)
         
         df = load_cached_data(timeframe, period, start_date, end_date, config)
@@ -516,6 +682,20 @@ async def pre_collect_historical_data(timeframe: str, period: str, start_date: s
                 save_cached_indicators(df_indicators, timeframe, config)
         else:
             df = df.merge(df_indicators, on='date', how='left', suffixes=('', '_ind'))
+        
+        # 獲取 FRED 數據（例如聯邦基金利率）
+        fred_series = ['FEDFUNDS', 'CPIAUCSL']  # 新增 CPI 數據
+        for series_id in fred_series:
+            fred_df = fetch_fred_data(series_id, start_date, end_date, config)
+            if not fred_df.empty:
+                save_fred_to_database(fred_df, series_id, config)
+                df = df.merge(fred_df, on='date', how='left')
+        
+        # 獲取 X API 數據（例如 USD/JPY 情緒）
+        x_query = "USDJPY OR USD/JPY OR 'Federal Reserve'"
+        x_df = fetch_x_data(x_query, start_date, end_date, config)
+        if not x_df.empty:
+            df = df.merge(x_df[['date', 'sentiment']], on='date', how='left')
         
         if not all(col in df.columns for col in ['RSI', 'MACD', 'ATR', 'STOCH_k']):
             print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 合併後缺少必要指標欄位")

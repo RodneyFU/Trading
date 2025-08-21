@@ -92,27 +92,26 @@ def clean_invalid_models(config):
         logging.error(f"Failed to clean invalid models: {str(e)}, traceback={traceback.format_exc()}")
 
 def get_system_proxy(config):
-    """中文註釋：獲取系統 Proxy 設定或配置檔案中的 Proxy，並測試連線"""
+    """中文註釋：獲取系統 Proxy 設定，使用有效 FRED API 鍵測試"""
     try:
-        # 優先檢查 config 中的 Proxy 設置
         proxies = config['system_config'].get('proxies', {})
         if not proxies:
             proxies = urllib.request.getproxies()
-        
         if proxies.get('http') or proxies.get('https'):
-            test_url = 'https://api.stlouisfed.org/fred/series/observations?series_id=FEDFUNDS&api_key=TEST&file_type=json'
-            try:
-                response = requests.get(test_url, proxies=proxies, timeout=5)
+            fred_api_key = config['api_keys'].get('fred_api_key', 'TEST')
+            test_url = f"https://api.stlouisfed.org/fred/series/observations?series_id=UNRATE&api_key={fred_api_key}&file_type=json"
+            response = requests.get(test_url, proxies=proxies, timeout=5)
+            if response.status_code == 200:
                 logging.debug(f"Proxy test successful: {proxies}")
-            except Exception as e:
-                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Proxy 測試失敗：{str(e)}")
-                logging.warning(f"Proxy test failed: {proxies}, error={str(e)}")
-                proxies = {}  # 測試失敗時禁用 Proxy
+            else:
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Proxy 測試失敗，狀態碼：{response.status_code}")
+                logging.warning(f"Proxy test failed: {proxies}, status_code={response.status_code}, response={response.text[:200]}")
+                proxies = {}
         logging.debug(f"Detected proxies: {proxies}")
         return proxies
     except Exception as e:
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 獲取 Proxy 失敗：{str(e)}")
-        logging.error(f"Failed to get proxies: {str(e)}, traceback={traceback.format_exc()}")
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Proxy 測試失敗：{str(e)}")
+        logging.warning(f"Proxy test failed: {proxies}, error={str(e)}")
         return {}
 
 def filter_future_dates(df: pd.DataFrame) -> pd.DataFrame:
@@ -191,13 +190,12 @@ def fetch_fmp_data(timeframe: str, start_date: str, end_date: str, config) -> pd
 
 @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=4, max=10))
 def fetch_fred_data(series_id: str, start_date: str, end_date: str, config) -> pd.DataFrame:
-    """中文註釋：從 FRED API 獲取經濟數據（如聯邦基金利率）"""
+    """中文註釋：從 FRED API 獲取經濟數據"""
     FRED_API_KEY = config['api_keys'].get('fred_api_key', '')
     if not FRED_API_KEY:
         print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FRED API 鍵未配置")
         logging.error("FRED API key not configured")
         return pd.DataFrame()
-    
     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 正在從 FRED 獲取 {series_id} 數據...")
     logging.info(f"Fetching FRED data: series_id={series_id}, start={start_date}, end={end_date}, api_key_masked={FRED_API_KEY[:5]}...")
     try:
@@ -212,8 +210,8 @@ def fetch_fred_data(series_id: str, start_date: str, end_date: str, config) -> p
         }
         response = requests.get(url, params=params, proxies=proxies, timeout=10).json()
         logging.debug(f"FRED response type={type(response)}, content_preview={str(response)[:200]}, proxies={proxies}, url={url}")
-        if 'observations' not in response or not response['observations']:
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FRED 數據為空或格式錯誤")
+        if 'error_code' in response or not response.get('observations'):
+            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FRED 數據為空或格式錯誤：{response.get('error_message', 'No error message')}")
             logging.warning(f"FRED data empty or invalid: {response}, series_id={series_id}")
             return pd.DataFrame()
         df = pd.DataFrame(response['observations'])
@@ -221,16 +219,15 @@ def fetch_fred_data(series_id: str, start_date: str, end_date: str, config) -> p
         df['value'] = pd.to_numeric(df['value'], errors='coerce')
         df = df[['date', 'value']].rename(columns={'value': series_id})
         df = filter_future_dates(df)
-        # 內插到日線數據
         if not df.empty:
             df.set_index('date', inplace=True)
             df = df.resample('D').ffill().reset_index()
         print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FRED 數據獲取成功：{series_id}")
-        logging.info(f"Successfully fetched FRED data: series_id={series_id}, shape={df.shape}, columns={df.columns.tolist()}")
+        logging.info(f"Successfully fetched FRED data: series_id={series_id}, shape={df.shape}")
         return df
     except Exception as e:
         print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FRED 數據獲取失敗：{str(e)}")
-        logging.error(f"Failed to fetch FRED data: {str(e)}, traceback={traceback.format_exc()}, series_id={series_id}, proxies={proxies}, url={url}")
+        logging.error(f"Failed to fetch FRED data: {str(e)}, traceback={traceback.format_exc()}, series_id={series_id}")
         return pd.DataFrame()
 
 @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=4, max=10))

@@ -1,25 +1,69 @@
 import pandas as pd
-import numpy as np
+import requests
 from datetime import datetime, timedelta
 import logging
 from pathlib import Path
-import sqlite3
-import yfinance as yf
-import pandas_ta as ta
-import requests
 from tenacity import retry, stop_after_attempt, wait_exponential
-from config import load_config
+from bs4 import BeautifulSoup
+import random
+import time
+import yfinance as yf
+import json
+import sqlite3
+from textblob import TextBlob
 import urllib.request
 import traceback
-import os
-import pickle
-from textblob import TextBlob
+
+# 設置日誌
+logging.basicConfig(
+    filename=r'C:\Trading\logs\backtest.log',
+    level=logging.DEBUG,
+    format='%(asctime)s %(levelname)s:%(message)s'
+)
+
+def load_config():
+    """中文註釋：載入所有配置文件"""
+    config = {}
+    try:
+        with open(r'C:\Trading\config\api_keys.json', 'r') as f:
+            config['api_keys'] = json.load(f)
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 成功載入設定檔：C:\\Trading\\config\\api_keys.json")
+    except Exception as e:
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 載入 api_keys.json 失敗：{str(e)}")
+        logging.error(f"Failed to load api_keys.json: {str(e)}")
+        config['api_keys'] = {}
+    
+    try:
+        with open(r'C:\Trading\config\system_config.json', 'r') as f:
+            config['system_config'] = json.load(f)
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 成功載入設定檔：C:\\Trading\\config\\system_config.json")
+    except Exception as e:
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 載入 system_config.json 失敗：{str(e)}")
+        logging.error(f"Failed to load system_config.json: {str(e)}")
+        config['system_config'] = {
+            'root_dir': r'C:\Trading',
+            'db_path': r'C:\Trading\data\trading_data.db',
+            'min_backtest_days': 180,
+            'proxies': {}
+        }
+    
+    try:
+        with open(r'C:\Trading\config\trading_params.json', 'r') as f:
+            config['trading_params'] = json.load(f)
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 成功載入設定檔：C:\\Trading\\config\\trading_params.json")
+    except Exception as e:
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 載入 trading_params.json 失敗：{str(e)}")
+        logging.error(f"Failed to load trading_params.json: {str(e)}")
+        config['trading_params'] = {}
+    
+    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 設定檔載入成功！")
+    logging.info("Configuration loaded successfully")
+    return config
 
 def initialize_database(config):
     """中文註釋：初始化 SQLite 資料庫，創建 OHLC、指標和經濟數據表格"""
-    DATA_DIR = Path(config['system_config']['root_dir']) / 'data'
-    DB_PATH = DATA_DIR / 'trading_data.db'
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    DB_PATH = Path(config['system_config']['db_path'])
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
@@ -46,9 +90,9 @@ def initialize_database(config):
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS economic_data (
             date TEXT,
-            series_id TEXT,
-            value REAL,
-            PRIMARY KEY (date, series_id)
+            event TEXT,
+            impact TEXT,
+            PRIMARY KEY (date, event)
         )
     ''')
     conn.commit()
@@ -56,40 +100,30 @@ def initialize_database(config):
     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 資料庫初始化完成：{DB_PATH}")
     logging.info(f"Database initialized: {DB_PATH}")
 
-def clean_cache(config):
-    """中文註釋：清理超過 30 天的快取檔案"""
-    DATA_DIR = Path(config['system_config']['root_dir']) / 'data'
+def import_to_database(config):
+    """中文註釋：將現有 economic_calendar.csv 匯入 SQLite 資料庫"""
+    DB_PATH = Path(config['system_config']['db_path'])
+    csv_path = Path(config['system_config']['root_dir']) / 'data' / 'economic_calendar.csv'
     try:
-        now = datetime.now()
-        for timeframe_dir in DATA_DIR.glob('historical/*/'):
-            for file in timeframe_dir.glob('*.pkl'):
-                mtime = datetime.fromtimestamp(file.stat().st_mtime)
-                if (now - mtime).days > 30:
-                    file.unlink()
-                    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 已刪除過期快取：{file}")
-                    logging.info(f"Deleted expired cache: {file}")
+        if csv_path.exists():
+            df = pd.read_csv(csv_path)
+            if not df.empty and all(col in df.columns for col in ['date', 'event', 'impact']):
+                df['date'] = pd.to_datetime(df['date'])
+                conn = sqlite3.connect(DB_PATH)
+                df.to_sql('economic_data', conn, if_exists='append', index=False)
+                conn.commit()
+                conn.close()
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 已從 {csv_path} 匯入經濟日曆到 SQLite")
+                logging.info(f"Imported economic calendar from {csv_path} to SQLite, shape={df.shape}")
+            else:
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} CSV 檔案無效或缺少必要欄位")
+                logging.warning(f"Invalid or missing columns in {csv_path}, columns={df.columns.tolist()}")
+        else:
+            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} CSV 檔案不存在：{csv_path}")
+            logging.warning(f"CSV file not found: {csv_path}")
     except Exception as e:
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 快取清理失敗：{str(e)}")
-        logging.error(f"Failed to clean cache: {str(e)}, traceback={traceback.format_exc()}")
-
-def clean_invalid_models(config):
-    """中文註釋：檢查並清除無效模型檔案"""
-    MODEL_DIR = Path(config['system_config']['root_dir']) / 'models'
-    MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    try:
-        for model_file in MODEL_DIR.glob('*.pkl'):
-            try:
-                with open(model_file, 'rb') as f:
-                    pickle.load(f)
-                logging.debug(f"Model file {model_file} is valid")
-            except Exception as e:
-                logging.warning(f"Invalid model file detected: {model_file}, error={str(e)}")
-                model_file.unlink()
-                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 已刪除無效模型檔案：{model_file}")
-                logging.info(f"Deleted invalid model file: {model_file}")
-    except Exception as e:
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 模型清理失敗：{str(e)}")
-        logging.error(f"Failed to clean invalid models: {str(e)}, traceback={traceback.format_exc()}")
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} CSV 匯入 SQLite 失敗：{str(e)}")
+        logging.error(f"Failed to import CSV to SQLite: {str(e)}, traceback={traceback.format_exc()}")
 
 def get_system_proxy(config):
     """中文註釋：獲取系統 Proxy 設定，使用有效 FRED API 鍵測試"""
@@ -115,7 +149,7 @@ def get_system_proxy(config):
         return {}
 
 def filter_future_dates(df: pd.DataFrame) -> pd.DataFrame:
-    """中文註釋：過濾掉未來日期的數據，確保數據不包含當前日期之後的記錄"""
+    """中文註釋：過濾未來日期"""
     current_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
     if not df.empty and 'date' in df.columns:
         initial_rows = len(df)
@@ -125,67 +159,69 @@ def filter_future_dates(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=4, max=10))
-def fetch_yahoo_finance_data(timeframe: str, period: str, start_date: str = None, end_date: str = None) -> pd.DataFrame:
-    """中文註釋：從 Yahoo Finance 獲取 USD/JPY 歷史數據"""
-    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 正在從 Yahoo Finance 獲取 {timeframe} 數據...")
+def fetch_yahoo_finance_data(timeframe: str, period: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """中文註釋：從 Yahoo Finance 獲取歷史數據"""
+    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 正在從 Yahoo Finance 獲取 {timeframe} 歷史數據...")
+    logging.info(f"Fetching Yahoo Finance data: timeframe={timeframe}, period={period}, start={start_date}, end={end_date}")
     try:
-        config = load_config()
-        proxies = get_system_proxy(config)
-        if proxies.get('http') or proxies.get('https'):
-            os.environ['HTTP_PROXY'] = proxies.get('http', '')
-            os.environ['HTTPS_PROXY'] = proxies.get('https', '')
-            logging.info(f"Using proxies for yfinance: HTTP={proxies.get('http')}, HTTPS={proxies.get('https')}")
-        else:
-            logging.debug("No proxies detected for yfinance")
-        
-        ticker = 'USDJPY=X'
-        df = yf.download(ticker, period=period, interval=timeframe, start=start_date, end=end_date)
+        symbol = 'USDJPY=X'
+        interval_map = {'1 hour': '1h', '4 hours': '4h', '1 day': '1d'}
+        interval = interval_map.get(timeframe, '1d')
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period=period, interval=interval, start=start_date, end=end_date)
         if df.empty:
             print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Yahoo Finance 數據為空")
-            logging.warning(f"Yahoo Finance returned empty data for timeframe={timeframe}, period={period}, start={start_date}, end={end_date}")
+            logging.warning(f"Yahoo Finance data empty: symbol={symbol}, timeframe={timeframe}")
             return pd.DataFrame()
-        df.reset_index(inplace=True)
-        df.rename(columns={'Date': 'date', 'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'}, inplace=True)
+        df = df.reset_index()
+        df.columns = df.columns.str.lower()
+        df = df.rename(columns={'datetime': 'date'})
+        df = df[['date', 'open', 'high', 'low', 'close', 'volume']]
         df['date'] = pd.to_datetime(df['date'])
         df = filter_future_dates(df)
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Yahoo Finance 數據獲取成功")
-        logging.info(f"Successfully fetched data from Yahoo Finance, shape={df.shape}, columns={df.columns.tolist()}")
-        return df[['date', 'open', 'high', 'low', 'close', 'volume']]
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Yahoo Finance 歷史數據獲取成功：{timeframe}")
+        logging.info(f"Successfully fetched Yahoo Finance data: shape={df.shape}, timeframe={timeframe}")
+        return df
     except Exception as e:
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Yahoo Finance 數據獲取失敗：{str(e)}")
-        logging.error(f"Failed to fetch Yahoo Finance data: {str(e)}, traceback={traceback.format_exc()}, timeframe={timeframe}, period={period}")
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Yahoo Finance 歷史數據獲取失敗：{str(e)}")
+        logging.error(f"Failed to fetch Yahoo Finance data: {str(e)}, traceback={traceback.format_exc()}")
         return pd.DataFrame()
-    finally:
-        os.environ.pop('HTTP_PROXY', None)
-        os.environ.pop('HTTPS_PROXY', None)
 
 @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=4, max=10))
 def fetch_fmp_data(timeframe: str, start_date: str, end_date: str, config) -> pd.DataFrame:
-    """中文註釋：從 FMP API 獲取 USD/JPY 歷史數據"""
-    FMP_API_KEY = config['api_keys']['fmp_api_key']
-    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 正在從 FMP 獲取 {timeframe} 數據...")
+    """中文註釋：從 FMP API 獲取歷史數據"""
+    FMP_API_KEY = config['api_keys'].get('fmp_api_key', '')
+    if not FMP_API_KEY:
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP API 鍵未配置")
+        logging.error("FMP API key not configured")
+        return pd.DataFrame()
+    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 正在從 FMP 獲取 {timeframe} 歷史數據...")
     logging.info(f"Fetching FMP data: timeframe={timeframe}, start={start_date}, end={end_date}, api_key_masked={FMP_API_KEY[:5]}...")
     try:
         proxies = get_system_proxy(config)
-        tf_map = {'1 hour': '1hour', '4 hours': '4hour', '1 day': '1day'}
-        url = f"https://financialmodelingprep.com/api/v3/historical-price-full/USDJPY?from={start_date}&to={end_date}&timeseries={tf_map[timeframe]}&apikey={FMP_API_KEY}"
+        interval_map = {'1 hour': '1hour', '4 hours': '4hour', '1 day': '1day'}
+        interval = interval_map.get(timeframe, '1day')
+        url = f"https://financialmodelingprep.com/api/v3/historical-price-full/USDJPY?from={start_date}&to={end_date}&apikey={FMP_API_KEY}&interval={interval}"
         response = requests.get(url, proxies=proxies, timeout=10).json()
-        logging.debug(f"FMP data response type={type(response)}, content_preview={str(response)[:200]}, proxies={proxies}, url={url}")
-        data = response.get('historical', [])
-        if not isinstance(data, list) or not data:
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 數據為空或格式錯誤")
-            logging.warning(f"FMP data non-list or empty: {response}, timeframe={timeframe}")
+        logging.debug(f"FMP response type={type(response)}, content_preview={str(response)[:200]}")
+        if isinstance(response, dict) and 'Error Message' in response:
+            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 歷史數據請求失敗：{response['Error Message']}")
+            logging.error(f"FMP historical data request failed: {response['Error Message']}")
             return pd.DataFrame()
-        df = pd.DataFrame(data)
-        df.rename(columns={'date': 'date', 'open': 'open', 'high': 'high', 'low': 'low', 'close': 'close', 'volume': 'volume'}, inplace=True)
+        df = pd.DataFrame(response.get('historical', []))
+        if df.empty or 'date' not in df.columns:
+            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 歷史數據為空或格式錯誤")
+            logging.warning(f"FMP historical data empty or invalid: shape={df.shape}")
+            return pd.DataFrame()
         df['date'] = pd.to_datetime(df['date'])
+        df = df[['date', 'open', 'high', 'low', 'close', 'volume']]
         df = filter_future_dates(df)
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 數據獲取成功")
-        logging.info(f"Successfully fetched FMP data: shape={df.shape}, columns={df.columns.tolist()}")
-        return df[['date', 'open', 'high', 'low', 'close', 'volume']]
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 歷史數據獲取成功：{timeframe}")
+        logging.info(f"Successfully fetched FMP data: shape={df.shape}, timeframe={timeframe}")
+        return df
     except Exception as e:
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 數據獲取失敗：{str(e)}")
-        logging.error(f"Failed to fetch FMP data: {str(e)}, traceback={traceback.format_exc()}, proxies={proxies}, url={url}")
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 歷史數據獲取失敗：{str(e)}")
+        logging.error(f"Failed to fetch FMP data: {str(e)}, traceback={traceback.format_exc()}")
         return pd.DataFrame()
 
 @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=4, max=10))
@@ -209,7 +245,7 @@ def fetch_fred_data(series_id: str, start_date: str, end_date: str, config) -> p
             'observation_end': end_date
         }
         response = requests.get(url, params=params, proxies=proxies, timeout=10).json()
-        logging.debug(f"FRED response type={type(response)}, content_preview={str(response)[:200]}, proxies={proxies}, url={url}")
+        logging.debug(f"FRED response type={type(response)}, content_preview={str(response)[:200]}")
         if 'error_code' in response or not response.get('observations'):
             print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FRED 數據為空或格式錯誤：{response.get('error_message', 'No error message')}")
             logging.warning(f"FRED data empty or invalid: {response}, series_id={series_id}")
@@ -227,18 +263,93 @@ def fetch_fred_data(series_id: str, start_date: str, end_date: str, config) -> p
         return df
     except Exception as e:
         print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FRED 數據獲取失敗：{str(e)}")
-        logging.error(f"Failed to fetch FRED data: {str(e)}, traceback={traceback.format_exc()}, series_id={series_id}")
+        logging.error(f"Failed to fetch FRED data: {str(e)}, traceback={traceback.format_exc()}")
+        return pd.DataFrame()
+
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=4, max=10))
+def fetch_forex_factory_calendar(start_date: str, end_date: str, config) -> pd.DataFrame:
+    """中文註釋：從 Forex Factory 經濟日曆抓取數據"""
+    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 正在從 Forex Factory 獲取經濟事件日曆...")
+    logging.info(f"Fetching Forex Factory calendar: start={start_date}, end={end_date}")
+    try:
+        proxies = get_system_proxy(config)
+        headers = {
+            'User-Agent': random.choice([
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            ])
+        }
+        start_dt = pd.to_datetime(start_date)
+        end_dt = pd.to_datetime(end_date)
+        current_dt = start_dt
+        events = []
+        while current_dt <= end_dt:
+            week_start = current_dt - timedelta(days=current_dt.weekday())
+            week_str = week_start.strftime('week=%b%d.%Y').lower()
+            url = f"https://www.forexfactory.com/calendar?{week_str}"
+            response = requests.get(url, headers=headers, proxies=proxies, timeout=10)
+            if response.status_code != 200:
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Forex Factory 請求失敗，狀態碼：{response.status_code}")
+                logging.warning(f"Forex Factory request failed, status_code={response.status_code}")
+                current_dt += timedelta(days=7)
+                continue
+            soup = BeautifulSoup(response.text, 'html.parser')
+            table = soup.find('table', class_='calendar__table')
+            if not table:
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Forex Factory 未找到日曆表格")
+                logging.warning("Could not find calendar table")
+                current_dt += timedelta(days=7)
+                continue
+            for row in table.find_all('tr', class_='calendar_row'):
+                date_cell = row.find('td', class_='calendar__date')
+                time_cell = row.find('td', class_='calendar__time')
+                currency_cell = row.find('td', class_='calendar__currency')
+                impact_cell = row.find('td', class_='calendar__impact')
+                event_cell = row.find('td', class_='calendar__event')
+                if not all([date_cell, time_cell, currency_cell, impact_cell, event_cell]):
+                    continue
+                date_str = date_cell.text.strip()
+                time_str = time_cell.text.strip()
+                currency = currency_cell.text.strip()
+                impact = impact_cell.find('span', class_='icon--ff-impact')['title'].lower() if impact_cell.find('span', class_='icon--ff-impact') else 'low'
+                event = event_cell.text.strip()
+                if currency not in ['USD', 'JPY']:
+                    continue
+                try:
+                    event_datetime = pd.to_datetime(f"{date_str} {time_str} {week_start.year}", format='%a, %b %d %I:%M%p %Y')
+                    if event_datetime < start_dt or event_datetime > end_dt:
+                        continue
+                    events.append({
+                        'date': event_datetime,
+                        'event': f"{currency} {event}",
+                        'impact': impact.capitalize()
+                    })
+                except ValueError:
+                    continue
+            current_dt += timedelta(days=7)
+            time.sleep(random.uniform(1, 3))
+        df = pd.DataFrame(events)
+        if df.empty:
+            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Forex Factory 經濟日曆為空")
+            logging.warning(f"Forex Factory calendar empty: shape={df.shape}")
+            return pd.DataFrame()
+        df = filter_future_dates(df)
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Forex Factory 經濟事件日曆獲取成功")
+        logging.info(f"Successfully fetched Forex Factory calendar: shape={df.shape}")
+        return df
+    except Exception as e:
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Forex Factory 經濟事件日曆獲取失敗：{str(e)}")
+        logging.error(f"Failed to fetch Forex Factory calendar: {str(e)}, traceback={traceback.format_exc()}")
         return pd.DataFrame()
 
 @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=4, max=10))
 def fetch_x_data(query: str, start_date: str, end_date: str, config) -> pd.DataFrame:
-    """中文註釋：從 X API 獲取與查詢相關的推文數據"""
+    """中文註釋：從 X API 獲取推文情緒數據"""
     X_BEARER_TOKEN = config['api_keys'].get('x_bearer_token', '')
     if not X_BEARER_TOKEN:
         print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} X Bearer Token 未配置")
         logging.error("X Bearer Token not configured")
         return pd.DataFrame()
-    
     print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 正在從 X API 獲取推文數據：{query}")
     logging.info(f"Fetching X data: query={query}, start={start_date}, end={end_date}, token_masked={X_BEARER_TOKEN[:5]}...")
     try:
@@ -252,7 +363,7 @@ def fetch_x_data(query: str, start_date: str, end_date: str, config) -> pd.DataF
             'max_results': 100
         }
         response = requests.get(url, headers=headers, params=params, proxies=proxies, timeout=10).json()
-        logging.debug(f"X API response type={type(response)}, content_preview={str(response)[:200]}, proxies={proxies}, url={url}")
+        logging.debug(f"X API response type={type(response)}, content_preview={str(response)[:200]}")
         if 'data' not in response or not response['data']:
             print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} X API 數據為空或格式錯誤")
             logging.warning(f"X API data empty or invalid: {response}, query={query}")
@@ -263,16 +374,118 @@ def fetch_x_data(query: str, start_date: str, end_date: str, config) -> pd.DataF
         df['sentiment'] = df['text'].apply(lambda x: TextBlob(x).sentiment.polarity)
         df = filter_future_dates(df)
         print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} X API 數據獲取成功")
-        logging.info(f"Successfully fetched X data: query={query}, shape={df.shape}, columns={df.columns.tolist()}")
+        logging.info(f"Successfully fetched X data: query={query}, shape={df.shape}")
         return df
     except Exception as e:
         print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} X API 數據獲取失敗：{str(e)}")
-        logging.error(f"Failed to fetch X data: {str(e)}, traceback={traceback.format_exc()}, query={query}, proxies={proxies}, url={url}")
+        logging.error(f"Failed to fetch X data: {str(e)}, traceback={traceback.format_exc()}")
         return pd.DataFrame()
+
+@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=4, max=10))
+def fetch_fmp_economic_calendar(start_date: str, end_date: str, config) -> pd.DataFrame:
+    """中文註釋：從 SQLite 或 FMP API 獲取經濟事件日曆，若失敗則使用 FRED 或 Forex Factory"""
+    DB_PATH = Path(config['system_config']['db_path'])
+    initialize_database(config)
+    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 正在從 SQLite 載入經濟事件日曆...")
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        query = "SELECT * FROM economic_data WHERE date BETWEEN ? AND ?"
+        df = pd.read_sql_query(query, conn, params=(start_date, end_date))
+        conn.close()
+        if not df.empty and all(col in df.columns for col in ['date', 'event', 'impact']):
+            df['date'] = pd.to_datetime(df['date'])
+            df = filter_future_dates(df)
+            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} SQLite 經濟事件日曆載入成功")
+            logging.info(f"Successfully loaded economic calendar from SQLite: shape={df.shape}")
+            return df
+    except Exception as e:
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} SQLite 經濟事件日曆載入失敗：{str(e)}")
+        logging.error(f"Failed to load economic calendar from SQLite: {str(e)}, traceback={traceback.format_exc()}")
+    
+    FMP_API_KEY = config['api_keys']['fmp_api_key']
+    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 正在從 FMP 獲取經濟事件日曆...")
+    logging.info(f"Fetching FMP economic calendar: start={start_date}, end={end_date}, api_key_masked={FMP_API_KEY[:5]}...")
+    try:
+        proxies = get_system_proxy(config)
+        url = f"https://financialmodelingprep.com/api/v3/economic-calendar?from={start_date}&to={end_date}&apikey={FMP_API_KEY}"
+        response = requests.get(url, proxies=proxies, timeout=10).json()
+        logging.debug(f"FMP response status={response.status_code}, content={response.text[:500]}")
+        if isinstance(response, dict) and 'Error Message' in response:
+            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 經濟日曆請求失敗：{response['Error Message']}")
+            logging.error(f"FMP economic calendar request failed: {response['Error Message']}")
+            raise Exception(f"FMP error: {response['Error Message']}")
+        df = pd.DataFrame(response)
+        if 'date' not in df.columns:
+            raise Exception("Missing 'date' column")
+        df['date'] = pd.to_datetime(df['date'])
+        df = df[['date', 'event', 'impact']]
+        df = filter_future_dates(df)
+        if not df.empty:
+            conn = sqlite3.connect(DB_PATH)
+            df.to_sql('economic_data', conn, if_exists='append', index=False)
+            conn.commit()
+            conn.close()
+            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 經濟事件日曆獲取成功並儲存到 SQLite")
+            logging.info(f"Successfully fetched and saved economic calendar from FMP: shape={df.shape}")
+            return df
+    except Exception as e:
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 經濟事件日曆獲取失敗：{str(e)}")
+        logging.error(f"Failed to fetch FMP economic calendar: {str(e)}, traceback={traceback.format_exc()}")
+        # 嘗試 FRED 備用
+        try:
+            fred_df = fetch_fred_data('UNRATE', start_date, end_date, config)
+            if not fred_df.empty:
+                fred_df = fred_df.rename(columns={'UNRATE': 'event_value'})
+                fred_df['event'] = 'US Unemployment Rate'
+                fred_df['impact'] = 'High'
+                fred_df = fred_df[['date', 'event', 'impact']]
+                conn = sqlite3.connect(DB_PATH)
+                fred_df.to_sql('economic_data', conn, if_exists='append', index=False)
+                conn.commit()
+                conn.close()
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FRED 經濟日曆替代成功（UNRATE）並儲存到 SQLite")
+                logging.info(f"Successfully used FRED UNRATE as economic calendar fallback: shape={fred_df.shape}")
+                return fred_df
+        except Exception as fred_e:
+            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FRED 經濟日曆替代失敗：{str(fred_e)}")
+            logging.error(f"Failed to fetch FRED UNRATE as fallback: {str(fred_e)}, traceback={traceback.format_exc()}")
+        # 嘗試 Forex Factory 備用
+        try:
+            ff_df = fetch_forex_factory_calendar(start_date, end_date, config)
+            if not ff_df.empty:
+                conn = sqlite3.connect(DB_PATH)
+                ff_df.to_sql('economic_data', conn, if_exists='append', index=False)
+                conn.commit()
+                conn.close()
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Forex Factory 經濟日曆備用成功並儲存到 SQLite")
+                logging.info(f"Successfully used Forex Factory as economic calendar fallback: shape={ff_df.shape}")
+                return ff_df
+        except Exception as ff_e:
+            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} Forex Factory 經濟日曆備用失敗：{str(ff_e)}")
+            logging.error(f"Failed to fetch Forex Factory calendar as fallback: {str(ff_e)}, traceback={traceback.format_exc()}")
+        return pd.DataFrame()
+
+def save_to_database(df: pd.DataFrame, timeframe: str, config):
+    """中文註釋：將歷史數據儲存到 SQLite 資料庫"""
+    DB_PATH = Path(config['system_config']['db_path'])
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        df_to_save = df[['date', 'open', 'high', 'low', 'close', 'volume']].copy()
+        df_to_save['timeframe'] = timeframe
+        df_to_save.to_sql('ohlc', conn, if_exists='append', index=False)
+        conn.commit()
+        conn.close()
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 歷史數據已儲存到 SQLite：{timeframe}")
+        logging.info(f"Data saved to SQLite: timeframe={timeframe}, shape={df.shape}")
+        return True
+    except Exception as e:
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 歷史數據儲存失敗：{str(e)}")
+        logging.error(f"Failed to save data to SQLite: {str(e)}, traceback={traceback.format_exc()}")
+        return False
 
 def load_from_database(timeframe: str, start_date: str, end_date: str, config) -> pd.DataFrame:
     """中文註釋：從 SQLite 資料庫載入歷史數據"""
-    DB_PATH = Path(config['system_config']['root_dir']) / 'data' / 'trading_data.db'
+    DB_PATH = Path(config['system_config']['db_path'])
     try:
         initialize_database(config)
         conn = sqlite3.connect(DB_PATH)
@@ -282,432 +495,153 @@ def load_from_database(timeframe: str, start_date: str, end_date: str, config) -
         if not df.empty:
             df['date'] = pd.to_datetime(df['date'])
             df = filter_future_dates(df)
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 從資料庫載入 {timeframe} 數據成功")
-            logging.info(f"Successfully loaded {timeframe} data from database, shape={df.shape}, columns={df.columns.tolist()}")
+            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 從 SQLite 載入 {timeframe} 歷史數據成功")
+            logging.info(f"Successfully loaded {timeframe} data from SQLite: shape={df.shape}")
             return df[['date', 'open', 'high', 'low', 'close', 'volume']]
         return pd.DataFrame()
     except Exception as e:
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 從資料庫載入 {timeframe} 數據失敗：{str(e)}")
-        logging.error(f"Failed to load {timeframe} data from database: {str(e)}, traceback={traceback.format_exc()}")
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 從 SQLite 載入 {timeframe} 歷史數據失敗：{str(e)}")
+        logging.error(f"Failed to load {timeframe} data from SQLite: {str(e)}, traceback={traceback.format_exc()}")
         return pd.DataFrame()
 
-def save_to_database(df: pd.DataFrame, timeframe: str, config):
-    """中文註釋：將數據儲存到 SQLite 資料庫"""
-    DB_PATH = Path(config['system_config']['root_dir']) / 'data' / 'trading_data.db'
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        df_to_save = df[['date', 'open', 'high', 'low', 'close', 'volume', 'timeframe']].copy()
-        df_to_save['timeframe'] = timeframe
-        df_to_save.to_sql('ohlc', conn, if_exists='append', index=False)
-        conn.commit()
-        conn.close()
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 數據已儲存到資料庫：{timeframe}")
-        logging.info(f"Data saved to database: {timeframe}, shape={df.shape}, columns={df.columns.tolist()}")
-        return True
-    except Exception as e:
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 資料庫儲存失敗：{str(e)}")
-        logging.error(f"Failed to save data to database: {str(e)}, traceback={traceback.format_exc()}")
-        return False
-
-def save_fred_to_database(df: pd.DataFrame, series_id: str, config):
-    """中文註釋：將 FRED 數據儲存到 SQLite 資料庫"""
-    DB_PATH = Path(config['system_config']['root_dir']) / 'data' / 'trading_data.db'
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        df_to_save = df[['date', series_id]].copy()
-        df_to_save['series_id'] = series_id
-        df_to_save = df_to_save.rename(columns={series_id: 'value'})
-        df_to_save.to_sql('economic_data', conn, if_exists='append', index=False)
-        conn.commit()
-        conn.close()
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FRED 數據已儲存到資料庫：{series_id}")
-        logging.info(f"FRED data saved to database: {series_id}, shape={df.shape}")
-        return True
-    except Exception as e:
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FRED 數據儲存失敗：{str(e)}")
-        logging.error(f"Failed to save FRED data to database: {str(e)}, traceback={traceback.format_exc()}")
-        return False
-
 def load_cached_data(timeframe: str, period: str, start_date: str, end_date: str, config) -> pd.DataFrame:
-    """中文註釋：從快取載入歷史數據，若無效或無快取則獲取新數據"""
+    """中文註釋：從快取或 SQLite 載入歷史數據，若無效則重新獲取"""
     DATA_DIR = Path(config['system_config']['root_dir']) / 'data'
     timeframe_dir = DATA_DIR / f'historical/{timeframe}'
     timeframe_dir.mkdir(parents=True, exist_ok=True)
     cache_file = timeframe_dir / f'USDJPY_{timeframe}.pkl'
-    
     try:
         if cache_file.exists():
             df = pd.read_pickle(cache_file)
             required_columns = ['date', 'open', 'high', 'low', 'close', 'volume']
-            if not all(col in df.columns for col in required_columns):
-                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 快取檔案 {cache_file} 缺少必要欄位")
-                logging.error(f"Cache file {cache_file} missing required columns, available_columns={df.columns.tolist()}")
+            if not all(col in df.columns for col in required_columns) or len(df) < 100:
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 快取檔案 {cache_file} 無效或數據不足：{len(df)} 行")
+                logging.error(f"Cache file {cache_file} invalid or insufficient: rows={len(df)}, columns={df.columns.tolist()}")
                 cache_file.unlink()
-                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 已刪除無效快取檔案：{cache_file}")
-                logging.info(f"Deleted invalid cache file: {cache_file}")
-                df = fetch_yahoo_finance_data(timeframe, period, start_date, end_date)
+                df = pd.DataFrame()
             else:
-                mtime = datetime.fromtimestamp(cache_file.stat().st_mtime)
-                cache_duration = {'1 hour': 24, '4 hours': 48, '1 day': 168}
-                if (datetime.now() - mtime).total_seconds() / 3600 < cache_duration.get(timeframe, 24):
-                    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 從快取載入 {timeframe} 數據")
-                    logging.info(f"Loaded {timeframe} data from cache, shape={df.shape}, columns={df.columns.tolist()}")
-                    return df
-        else:
-            df = load_from_database(timeframe, start_date, end_date, config)
-            if not df.empty:
+                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 從快取載入 {timeframe} 數據")
+                logging.info(f"Loaded {timeframe} data from cache: shape={df.shape}")
                 return df
-    
+        df = load_from_database(timeframe, start_date, end_date, config)
+        if not df.empty and len(df) >= 100:
+            return df
         df = fetch_yahoo_finance_data(timeframe, period, start_date, end_date)
-        if df.empty:
+        if df.empty or len(df) < 100:
             df = fetch_fmp_data(timeframe, start_date, end_date, config)
-    
-        if not df.empty:
+        if not df.empty and len(df) >= 100:
             df.to_pickle(cache_file)
             save_to_database(df, timeframe, config)
-            year = datetime.now().strftime('%Y')
-            backup_dir = DATA_DIR / 'backtest' / year
-            backup_dir.mkdir(parents=True, exist_ok=True)
-            current_date = datetime.now().strftime('%Y%m%d')
-            df.to_pickle(backup_dir / f'USDJPY_{timeframe}_{current_date}.pkl')
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 數據已快取並備份：{cache_file}")
-            logging.info(f"Data cached and backed up: {cache_file}, shape={df.shape}, columns={df.columns.tolist()}")
+            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 數據已快取並儲存到 SQLite：{cache_file}")
+            logging.info(f"Data cached and saved to SQLite: {cache_file}, shape={df.shape}")
         return df
     except Exception as e:
         print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 快取載入失敗：{str(e)}")
         logging.error(f"Failed to load cache: {str(e)}, traceback={traceback.format_exc()}")
         return pd.DataFrame()
 
-def load_cached_indicators(timeframe: str, config) -> pd.DataFrame:
-    """中文註釋：從快取載入技術指標，若無效則刪除"""
-    DATA_DIR = Path(config['system_config']['root_dir']) / 'data'
-    indicators_dir = DATA_DIR / f'indicators/{timeframe}'
-    indicators_dir.mkdir(parents=True, exist_ok=True)
-    cache_file = indicators_dir / f'USDJPY_{timeframe}_indicators.pkl'
-    
-    try:
-        if cache_file.exists():
-            df = pd.read_pickle(cache_file)
-            required_columns = ['date', 'RSI', 'MACD', 'ATR', 'STOCH_k', 'EMA_20', 'EMA_50']
-            if not all(col in df.columns for col in required_columns):
-                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 技術指標快取 {cache_file} 缺少必要欄位")
-                logging.error(f"Indicators cache {cache_file} missing required columns, available_columns={df.columns.tolist()}")
-                cache_file.unlink()
-                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 已刪除無效指標快取：{cache_file}")
-                logging.info(f"Deleted invalid indicators cache: {cache_file}")
-                return pd.DataFrame()
-            mtime = datetime.fromtimestamp(cache_file.stat().st_mtime)
-            cache_duration = {'1 hour': 24, '4 hours': 48, '1 day': 168}
-            if (datetime.now().strftime('%Y-%m-%d %H:%M:%S') - mtime).total_seconds() / 3600 < cache_duration.get(timeframe, 24):
-                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 從快取載入 {timeframe} 技術指標")
-                logging.info(f"Loaded {timeframe} indicators from cache, shape={df.shape}, columns={df.columns.tolist()}")
-                return df
-        return pd.DataFrame()
-    except Exception as e:
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 技術指標快取載入失敗：{str(e)}")
-        logging.error(f"Failed to load indicators cache: {str(e)}, traceback={traceback.format_exc()}")
-        if cache_file.exists():
-            cache_file.unlink()
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 已刪除無效指標快取：{cache_file}")
-            logging.info(f"Deleted invalid indicators cache: {cache_file}")
-        return pd.DataFrame()
-
-def save_cached_indicators(df: pd.DataFrame, timeframe: str, config):
-    """中文註釋：儲存技術指標到快取，確保包含必要欄位"""
-    DATA_DIR = Path(config['system_config']['root_dir']) / 'data'
-    indicators_dir = DATA_DIR / f'indicators/{timeframe}'
-    indicators_dir.mkdir(parents=True, exist_ok=True)
-    cache_file = indicators_dir / f'USDJPY_{timeframe}_indicators.pkl'
-    try:
-        required_columns = ['date', 'RSI', 'MACD', 'ATR', 'STOCH_k', 'EMA_20', 'EMA_50']
-        if not all(col in df.columns for col in required_columns):
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 無法儲存技術指標快取：缺少必要欄位")
-            logging.error(f"Cannot cache indicators: missing required columns, available_columns={df.columns.tolist()}")
-            return
-        df.to_pickle(cache_file)
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 技術指標已快取：{cache_file}")
-        logging.info(f"Indicators cached: {cache_file}, shape={df.shape}, columns={df.columns.tolist()}")
-    except Exception as e:
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 技術指標快取儲存失敗：{str(e)}")
-        logging.error(f"Failed to cache indicators: {str(e)}, traceback={traceback.format_exc()}")
-
-@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=4, max=10))
-def fetch_fmp_indicators(timeframe: str, start_date: str, end_date: str, config) -> pd.DataFrame:
-    """中文註釋：從 FMP API 獲取技術指標"""
-    FMP_API_KEY = config['api_keys']['fmp_api_key']
-    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 正在從 FMP 獲取 {timeframe} 技術指標...")
-    logging.info(f"Fetching FMP indicators: timeframe={timeframe}, start={start_date}, end={end_date}, api_key_masked={FMP_API_KEY[:5]}...")
-    try:
-        proxies = get_system_proxy(config)
-        tf_map = {'1 hour': '1hour', '4 hours': '4hour', '1 day': '1day'}
-        url = f"https://financialmodelingprep.com/api/v3/technical_indicator/{tf_map[timeframe]}/USDJPY?from={start_date}&to={end_date}&apikey={FMP_API_KEY}"
-        response = requests.get(url, proxies=proxies, timeout=10).json()
-        logging.debug(f"FMP indicators response type={type(response)}, content_preview={str(response)[:200]}, proxies={proxies}, url={url}")
-        if 'error' in response.lower():
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 技術指標請求失敗：{response}")
-            logging.error(f"FMP indicators request failed: {response}")
-            return pd.DataFrame()
-        df = pd.DataFrame(response)
-        if df.empty:
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 技術指標為空")
-            logging.warning(f"FMP returned empty indicators for timeframe={timeframe}")
-            return pd.DataFrame()
-        df['date'] = pd.to_datetime(df['date'])
-        df = filter_future_dates(df)
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 技術指標獲取成功")
-        logging.info(f"Successfully fetched indicators from FMP: shape={df.shape}, columns={df.columns.tolist()}")
-        return df
-    except Exception as e:
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 技術指標獲取失敗：{str(e)}")
-        logging.error(f"Failed to fetch FMP indicators: {str(e)}, traceback={traceback.format_exc()}, proxies={proxies}, url={url}")
-        return pd.DataFrame()
-
-def compute_indicators(df: pd.DataFrame, config) -> pd.DataFrame:
-    """中文註釋：計算技術指標的輔助函數"""
-    INDICATORS = config['system_config']['indicators']
-    try:
-        if df.empty or not all(col in df.columns for col in ['close', 'high', 'low', 'volume']):
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 輸入 DataFrame 缺少必要欄位")
-            logging.error(f"Input DataFrame missing required columns, df_shape={df.shape}, available_columns={df.columns.tolist()}")
-            return df
-        
-        required_indicators = ['RSI', 'MACD', 'ATR', 'Stochastic', 'Bollinger', 'EMA']
-        for indicator in required_indicators:
-            if indicator not in INDICATORS:
-                logging.warning(f"Indicator '{indicator}' missing in config, setting to False")
-                INDICATORS[indicator] = False
-        
-        df = df.copy()
-        if INDICATORS['RSI']:
-            df['RSI'] = ta.rsi(df['close'], length=14)
-        if INDICATORS['MACD']:
-            macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
-            if macd is not None:
-                df['MACD'] = macd['MACD_12_26_9']
-                df['MACD_Signal'] = macd['MACDs_12_26_9']
-        if INDICATORS['ATR']:
-            df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=14)
-        if INDICATORS['Bollinger']:
-            bbands = ta.bbands(df['close'], length=20, std=2)
-            if bbands is not None:
-                df['BB_upper'] = bbands['BBU_20_2.0']
-                df['BB_lower'] = bbands['BBL_20_2.0']
-        if INDICATORS['Stochastic']:
-            stoch = ta.stoch(df['high'], df['low'], df['close'], k=14, d=3)
-            if stoch is not None:
-                df['STOCH_k'] = stoch['STOCHk_14_3_3']
-                df['STOCH_d'] = stoch['STOCHd_14_3_3']
-        if INDICATORS['ADX']:
-            df['ADX'] = ta.adx(df['high'], df['low'], df['close'], length=14)['ADX_14']
-        if INDICATORS['Fibonacci']:
-            high = df['high'].max()
-            low = df['low'].min()
-            levels = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1.0]
-            fib_levels = [low + level * (high - low) for level in levels]
-            for i, level in enumerate(fib_levels):
-                df[f'Fib_{levels[i]}'] = level
-        if INDICATORS['Ichimoku']:
-            ichimoku = ta.ichimoku(df['high'], df['low'], df['close'], tenkan=9, kijun=26, senkou=52)
-            if ichimoku[0] is not None:
-                df['ICHIMOKU_tenkan'] = ichimoku[0]['ITS_9']
-                df['ICHIMOKU_kijun'] = ichimoku[0]['IKS_26']
-                df['ICHIMOKU_senkou_a'] = ichimoku[0]['ISA_9']
-                df['ICHIMOKU_senkou_b'] = ichimoku[0]['ISB_26']
-        if INDICATORS['EMA']:
-            df['EMA_20'] = ta.ema(df['close'], length=20)
-            df['EMA_50'] = ta.ema(df['close'], length=50)
-        if INDICATORS['OBV']:
-            df['OBV'] = ta.obv(df['close'], df['volume'])
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 技術指標計算完成")
-        logging.info(f"Computed indicators: columns_added={list(set(df.columns) - {'date', 'open', 'high', 'low', 'close', 'volume'})}, shape={df.shape}")
-        return df
-    except Exception as e:
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 技術指標計算失敗：{str(e)}")
-        logging.error(f"Failed to compute indicators: {str(e)}, traceback={traceback.format_exc()}, df_shape={df.shape}, available_columns={df.columns.tolist()}")
-        return df
-
 def calculate_technical_indicators(df: pd.DataFrame, config) -> pd.DataFrame:
-    """中文註釋：計算技術指標並返回包含指標的 DataFrame"""
-    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 正在計算技術指標...")
+    """中文註釋：計算技術指標（RSI, MACD, ATR 等）"""
     try:
-        if df.empty or not all(col in df.columns for col in ['date', 'close', 'high', 'low', 'volume']):
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 數據為空或缺少必要欄位")
-            logging.error(f"Data is empty or missing required columns, df_shape={df.shape}, available_columns={df.columns.tolist()}")
-            return df
-        df_indicators = compute_indicators(df, config)
-        required_columns = ['RSI', 'MACD', 'ATR', 'STOCH_k']
-        if not all(col in df_indicators.columns for col in required_columns):
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 技術指標計算失敗：缺少必要欄位")
-            logging.error(f"Failed to compute required indicators, available_columns={df_indicators.columns.tolist()}, df_shape={df_indicators.shape}")
-            return df_indicators
-        df_indicators.dropna(inplace=True)
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 技術指標計算完成")
-        logging.info(f"Technical indicators calculated successfully, final_shape={df_indicators.shape}, columns={df_indicators.columns.tolist()}")
-        return df_indicators
+        indicators = config['system_config'].get('indicators', {})
+        if indicators.get('RSI', False):
+            df['RSI'] = compute_rsi(df['close'], 14)
+        if indicators.get('MACD', False):
+            df['MACD'], df['MACD_signal'], df['MACD_hist'] = compute_macd(df['close'])
+        if indicators.get('ATR', False):
+            df['ATR'] = compute_atr(df['high'], df['low'], df['close'], 14)
+        if indicators.get('Stochastic', False):
+            df['Stoch_K'], df['Stoch_D'] = compute_stochastic(df['high'], df['low'], df['close'], 14)
+        if indicators.get('Bollinger', False):
+            df['BB_upper'], df['BB_middle'], df['BB_lower'] = compute_bollinger_bands(df['close'], 20)
+        if indicators.get('EMA', False):
+            df['EMA_12'] = df['close'].ewm(span=12, adjust=False).mean()
+            df['EMA_26'] = df['close'].ewm(span=26, adjust=False).mean()
+        logging.info(f"Calculated technical indicators: {df.columns.tolist()}")
+        return df
     except Exception as e:
         print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 技術指標計算失敗：{str(e)}")
-        logging.error(f"Failed to calculate technical indicators: {str(e)}, traceback={traceback.format_exc()}, df_shape={df.shape}, available_columns={df.columns.tolist()}")
+        logging.error(f"Failed to calculate technical indicators: {str(e)}, traceback={traceback.format_exc()}")
         return df
 
-@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=4, max=10))
-def fetch_fmp_economic_calendar(start_date: str, end_date: str, config) -> pd.DataFrame:
-    """中文註釋：從 FMP API 獲取經濟事件日曆，若失敗則載入本地檔案或使用 FRED 替代"""
-    FMP_API_KEY = config['api_keys']['fmp_api_key']
-    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 正在從 FMP 獲取經濟事件日曆...")
-    logging.info(f"Fetching FMP economic calendar: start={start_date}, end={end_date}, api_key_masked={FMP_API_KEY[:5]}...")
-    try:
-        proxies = get_system_proxy(config)
-        url = f"https://financialmodelingprep.com/api/v3/economic-calendar?from={start_date}&to={end_date}&apikey={FMP_API_KEY}"
-        response = requests.get(url, proxies=proxies, timeout=10).json()
-        logging.debug(f"FMP response type={type(response)}, content_preview={str(response)[:200]}, proxies={proxies}, url={url}")
-        if isinstance(response, dict) and 'Error Message' in response:
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 經濟日曆請求失敗：{response['Error Message']}")
-            logging.error(f"FMP economic calendar request failed: {response['Error Message']}")
-            raise Exception(f"FMP error: {response['Error Message']}")
-        if not isinstance(response, list) or not response:
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 經濟事件日曆為空或格式錯誤")
-            logging.warning(f"FMP economic calendar non-list or empty: {response}")
-            raise Exception("FMP data empty or invalid")
-        df = pd.DataFrame(response)
-        if 'date' not in df.columns:
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 經濟事件日曆缺少 'date' 欄位")
-            logging.error(f"FMP economic calendar missing 'date' column, available_columns={df.columns.tolist()}")
-            raise Exception("Missing 'date' column")
-        df['date'] = pd.to_datetime(df['date'])
-        df = df[['date', 'event', 'impact']]
-        df = filter_future_dates(df)
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 經濟事件日曆獲取成功")
-        logging.info(f"Successfully fetched economic calendar from FMP: shape={df.shape}, columns={df.columns.tolist()}")
-        return df
-    except Exception as e:
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FMP 經濟事件日曆獲取失敗：{str(e)}")
-        logging.error(f"Failed to fetch FMP economic calendar: {str(e)}, traceback={traceback.format_exc()}, proxies={proxies}, url={url}")
-        # 嘗試使用 FRED 經濟日曆作為替代
-        try:
-            fred_df = fetch_fred_data('ECI', start_date, end_date, config)
-            if not fred_df.empty:
-                fred_df = fred_df.rename(columns={'ECI': 'event_value'})
-                fred_df['event'] = 'Economic Indicator (ECI)'
-                fred_df['impact'] = 'Medium'
-                fred_df = fred_df[['date', 'event', 'impact']]
-                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FRED 經濟日曆替代成功")
-                logging.info(f"Successfully used FRED ECI as economic calendar fallback: shape={fred_df.shape}")
-                return fred_df
-        except Exception as fred_e:
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} FRED 經濟日曆替代失敗：{str(fred_e)}")
-            logging.error(f"Failed to fetch FRED ECI as fallback: {str(fred_e)}, traceback={traceback.format_exc()}")
-        # 最後嘗試本地檔案
-        try:
-            calendar_path = Path(config['system_config']['economic_calendar_path'])
-            if not calendar_path.exists():
-                calendar_path.parent.mkdir(parents=True, exist_ok=True)
-                pd.DataFrame(columns=['date', 'event', 'impact']).to_csv(calendar_path, index=False)
-                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 已創建空經濟事件日曆：{calendar_path}")
-                logging.info(f"Created empty economic calendar: {calendar_path}")
-            df = pd.read_csv(calendar_path)
-            if df.empty or not all(col in df.columns for col in ['date', 'event', 'impact']):
-                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 本地經濟事件日曆無效或為空")
-                logging.error(f"Local economic calendar invalid or empty: shape={df.shape}, columns={df.columns.tolist()}")
-                return pd.DataFrame()
-            df['date'] = pd.to_datetime(df['date'])
-            df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
-            df = filter_future_dates(df)
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 本地經濟事件日曆載入成功")
-            logging.info(f"Successfully loaded local economic calendar: shape={df.shape}, columns={df.columns.tolist()}")
-            return df
-        except Exception as local_e:
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 本地經濟事件日曆載入失敗：{str(local_e)}")
-            logging.error(f"Failed to load local economic calendar: {str(local_e)}, traceback={traceback.format_exc()}")
-            return pd.DataFrame()
-    finally:
-        os.environ.pop('HTTP_PROXY', None)
-        os.environ.pop('HTTPS_PROXY', None)
+def compute_rsi(data: pd.Series, periods: int = 14) -> pd.Series:
+    """中文註釋：計算 RSI"""
+    delta = data.diff()
+    gain = delta.where(delta > 0, 0).rolling(window=periods).mean()
+    loss = -delta.where(delta < 0, 0).rolling(window=periods).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def compute_macd(data: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> tuple:
+    """中文註釋：計算 MACD"""
+    exp1 = data.ewm(span=fast, adjust=False).mean()
+    exp2 = data.ewm(span=slow, adjust=False).mean()
+    macd = exp1 - exp2
+    signal_line = macd.ewm(span=signal, adjust=False).mean()
+    hist = macd - signal_line
+    return macd, signal_line, hist
+
+def compute_atr(high: pd.Series, low: pd.Series, close: pd.Series, periods: int = 14) -> pd.Series:
+    """中文註釋：計算 ATR"""
+    tr1 = high - low
+    tr2 = abs(high - close.shift())
+    tr3 = abs(low - close.shift())
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return tr.rolling(window=periods).mean()
+
+def compute_stochastic(high: pd.Series, low: pd.Series, close: pd.Series, periods: int = 14) -> tuple:
+    """中文註釋：計算隨機指標"""
+    lowest_low = low.rolling(window=periods).min()
+    highest_high = high.rolling(window=periods).max()
+    k = 100 * (close - lowest_low) / (highest_high - lowest_low)
+    d = k.rolling(window=3).mean()
+    return k, d
+
+def compute_bollinger_bands(data: pd.Series, periods: int = 20, std_dev: float = 2) -> tuple:
+    """中文註釋：計算布林帶"""
+    sma = data.rolling(window=periods).mean()
+    std = data.rolling(window=periods).std()
+    upper_band = sma + std_dev * std
+    lower_band = sma - std_dev * std
+    return upper_band, sma, lower_band
 
 async def pre_collect_historical_data(timeframe: str, period: str, start_date: str = None, end_date: str = None, config=None) -> pd.DataFrame:
-    """中文註釋：預先收集歷史數據並計算技術指標，確保回測期間至少為配置的最小天數"""
-    print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 正在預收集 {timeframe} 歷史數據...")
-    try:
-        if config is None:
-            config = load_config()
-        
-        # 確保最小回測期間
-        min_days = config['system_config'].get('min_backtest_days', 180)
-        current_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        if not end_date:
-            end_date = current_date.strftime('%Y-%m-%d')
-        if not start_date:
-            start_date = (pd.to_datetime(end_date) - timedelta(days=min_days)).strftime('%Y-%m-%d')
-        
-        # 驗證並自動調整日期範圍
-        try:
-            end_date_dt = pd.to_datetime(end_date)
-            start_date_dt = pd.to_datetime(start_date)
-            if end_date_dt > current_date:
-                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 結束日期 {end_date} 為未來日期，調整為當前日期 {current_date.strftime('%Y-%m-%d')}")
-                logging.warning(f"End date {end_date} is in the future, adjusting to {current_date.strftime('%Y-%m-%d')}")
-                end_date_dt = current_date
-                end_date = end_date_dt.strftime('%Y-%m-%d')
-            date_diff = (end_date_dt - start_date_dt).days
-            if date_diff < min_days:
-                print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 回測期間太短：{date_diff} 天，自動調整到 {min_days} 天")
-                logging.warning(f"Backtest period too short: {date_diff} days, adjusting to {min_days} days")
-                start_date_dt = end_date_dt - timedelta(days=min_days)
-                start_date = start_date_dt.strftime('%Y-%m-%d')
-                logging.info(f"Adjusted start_date to {start_date} to meet minimum {min_days} days")
-        except Exception as e:
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 日期格式錯誤：{str(e)}，使用預設 {min_days} 天")
-            logging.error(f"Invalid date format: {str(e)}, using default {min_days} days")
-            end_date = current_date.strftime('%Y-%m-%d')
-            start_date = (pd.to_datetime(end_date) - timedelta(days=min_days)).strftime('%Y-%m-%d')
-        
-        clean_invalid_models(config)
-        
-        df = load_cached_data(timeframe, period, start_date, end_date, config)
-        if df.empty:
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 無法獲取 {timeframe} 歷史數據")
-            logging.warning(f"Failed to fetch {timeframe} historical data")
-            return pd.DataFrame()
-        if len(df) < 100:
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 數據量不足：{len(df)} 行，需至少 100 行")
-            logging.error(f"Insufficient data: {len(df)} rows, required at least 100")
-            return pd.DataFrame()
-        
-        df_indicators = load_cached_indicators(timeframe, config)
-        if df_indicators.empty:
-            df_indicators = calculate_technical_indicators(df, config)
-            if not df_indicators.empty and all(col in df_indicators.columns for col in ['RSI', 'MACD', 'ATR', 'STOCH_k']):
-                save_cached_indicators(df_indicators, timeframe, config)
-        else:
-            df = df.merge(df_indicators, on='date', how='left', suffixes=('', '_ind'))
-        
-        # 獲取 FRED 數據（例如聯邦基金利率）
-        fred_series = ['FEDFUNDS', 'CPIAUCSL']  # 新增 CPI 數據
-        for series_id in fred_series:
-            fred_df = fetch_fred_data(series_id, start_date, end_date, config)
-            if not fred_df.empty:
-                save_fred_to_database(fred_df, series_id, config)
-                df = df.merge(fred_df, on='date', how='left')
-        
-        # 獲取 X API 數據（例如 USD/JPY 情緒）
-        x_query = "USDJPY OR USD/JPY OR 'Federal Reserve'"
-        x_df = fetch_x_data(x_query, start_date, end_date, config)
-        if not x_df.empty:
-            df = df.merge(x_df[['date', 'sentiment']], on='date', how='left')
-        
-        if not all(col in df.columns for col in ['RSI', 'MACD', 'ATR', 'STOCH_k']):
-            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 合併後缺少必要指標欄位")
-            logging.error(f"Missing required indicator columns after merge, available_columns={df.columns.tolist()}, final_shape={df.shape}")
-            return df
-        
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} {timeframe} 歷史數據和指標準備完成")
-        logging.info(f"{timeframe} historical data and indicators prepared, final_shape={df.shape}, columns={df.columns.tolist()}")
-        return df
-    except Exception as e:
-        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 預收集 {timeframe} 歷史數據失敗：{str(e)}")
-        logging.error(f"Failed to pre-collect {timeframe} historical data: {str(e)}, traceback={traceback.format_exc()}, df_shape={df.shape if 'df' in locals() else 'N/A'}")
-        return pd.DataFrame()
-
-if __name__ == "__main__":
-    config = load_config()
+    """中文註釋：預收集歷史數據並計算技術指標與情緒數據"""
+    if config is None:
+        config = load_config()
     initialize_database(config)
-    clean_cache(config)
+    import_to_database(config)
+    min_days = config['system_config'].get('min_backtest_days', 180)
+    current_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    if not end_date:
+        end_date = current_date.strftime('%Y-%m-%d')
+    if not start_date:
+        start_date = (pd.to_datetime(end_date) - timedelta(days=min_days)).strftime('%Y-%m-%d')
+    try:
+        end_date_dt = pd.to_datetime(end_date)
+        start_date_dt = pd.to_datetime(start_date)
+        if end_date_dt > current_date:
+            end_date_dt = current_date
+            end_date = end_date_dt.strftime('%Y-%m-%d')
+        date_diff = (end_date_dt - start_date_dt).days
+        if date_diff < min_days:
+            start_date_dt = end_date_dt - timedelta(days=min_days)
+            start_date = start_date_dt.strftime('%Y-%m-%d')
+            print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 回測期間太短：{date_diff} 天，自動調整到 {min_days} 天")
+            logging.info(f"Adjusted start_date to {start_date} to meet minimum {min_days} days")
+    except Exception as e:
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 日期格式錯誤：{str(e)}")
+        logging.error(f"Invalid date format: {str(e)}, using default {min_days} days")
+        start_date = (current_date - timedelta(days=min_days)).strftime('%Y-%m-%d')
+    df = load_cached_data(timeframe, period, start_date, end_date, config)
+    if df.empty or len(df) < 100:
+        print(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 數據量不足：{len(df)} 行，需至少 100 行")
+        logging.error(f"Insufficient data: {len(df)} rows, required at least 100")
+        return pd.DataFrame()
+    df = calculate_technical_indicators(df, config)
+    x_query = "USDJPY OR USD/JPY OR 'Federal Reserve'"
+    x_df = fetch_x_data(x_query, start_date, end_date, config)
+    if not x_df.empty:
+        df = df.merge(x_df[['date', 'sentiment']], on='date', how='left')
+        df['sentiment'] = df['sentiment'].fillna(0)
+    return df

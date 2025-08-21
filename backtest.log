@@ -1,0 +1,198 @@
+﻿2025-08-21 14:59:25,989 - DEBUG - proactor_events - Using proactor: IocpProactor
+2025-08-21 14:59:25,989 - INFO - main - [BACKTEST] Starting backtest: start_date=2025-05-13, end_date=2025-08-21
+2025-08-21 14:59:25,989 - INFO - main - [BACKTEST] Fetching economic calendar...
+2025-08-21 14:59:25,989 - INFO - data - Fetching FMP economic calendar: start=2025-05-13, end=2025-08-21, api_key_masked=uUFGG...
+2025-08-21 14:59:26,004 - DEBUG - connectionpool - Starting new HTTPS connection (1): api.stlouisfed.org:443
+2025-08-21 14:59:31,087 - WARNING - data - Proxy test failed: {'http': 'http://proxy1.scig.gov.hk:8080'}, error=HTTPSConnectionPool(host='api.stlouisfed.org', port=443): Max retries exceeded with url: /fred/series/observations?series_id=FEDFUNDS&api_key=TEST&file_type=json (Caused by ConnectTimeoutError(<urllib3.connection.HTTPSConnection object at 0x0000020A71FF7100>, 'Connection to api.stlouisfed.org timed out. (connect timeout=5)'))
+2025-08-21 14:59:31,087 - DEBUG - data - Detected proxies: {}
+2025-08-21 14:59:31,087 - DEBUG - connectionpool - Starting new HTTPS connection (1): financialmodelingprep.com:443
+2025-08-21 15:00:31,191 - ERROR - data - Failed to fetch FMP economic calendar: HTTPSConnectionPool(host='financialmodelingprep.com', port=443): Max retries exceeded with url: /api/v3/economic-calendar?from=2025-05-13&to=2025-08-21&apikey=uUFGG1dA6jFHeFgf1XHNJpt4obL3uJfS (Caused by ConnectTimeoutError(<urllib3.connection.HTTPSConnection object at 0x0000020A71FF6E30>, 'Connection to financialmodelingprep.com timed out. (connect timeout=10)')), traceback=Traceback (most recent call last):
+  File "c:\Trading\venv\lib\site-packages\urllib3\connection.py", line 198, in _new_conn
+    sock = connection.create_connection(
+  File "c:\Trading\venv\lib\site-packages\urllib3\util\connection.py", line 85, in create_connection
+    raise err
+  File "c:\Trading\venv\lib\site-packages\urllib3\util\connection.py", line 73, in create_connection
+    sock.connect(sa)
+TimeoutError: timed out
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "c:\Trading\venv\lib\site-packages\urllib3\connectionpool.py", line 787, in urlopen
+    response = self._make_request(
+  File "c:\Trading\venv\lib\site-packages\urllib3\connectionpool.py", line 488, in _make_request
+    raise new_e
+  File "c:\Trading\venv\lib\site-packages\urllib3\connectionpool.py", line 464, in _make_request
+    self._validate_conn(conn)
+  File "c:\Trading\venv\lib\site-packages\urllib3\connectionpool.py", line 1093, in _validate_conn
+    conn.connect()
+  File "c:\Trading\venv\lib\site-packages\urllib3\connection.py", line 753, in connect
+    self.sock = sock = self._new_conn()
+  File "c:\Trading\venv\lib\site-packages\urllib3\connection.py", line 207, in _new_conn
+    raise ConnectTimeoutError(
+urllib3.exceptions.ConnectTimeoutError: (<urllib3.connection.HTTPSConnection object at 0x0000020A71FF6E30>, 'Connection to financialmodelingprep.com timed out. (connect timeout=10)')
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "c:\Trading\venv\lib\site-packages\requests\adapters.py", line 644, in send
+    resp = conn.urlopen(
+  File "c:\Trading\venv\lib\site-packages\urllib3\connectionpool.py", line 841, in urlopen
+    retries = retries.increment(
+  File "c:\Trading\venv\lib\site-packages\urllib3\util\retry.py", line 519, in increment
+    raise MaxRetryError(_pool, url, reason) from reason  # type: ignore[arg-type]
+urllib3.exceptions.MaxRetryError: HTTPSConnectionPool(host='financialmodelingprep.com', port=443): Max retries exceeded with url: /api/v3/economic-calendar?from=2025-05-13&to=2025-08-21&apikey=uUFGG1dA6jFHeFgf1XHNJpt4obL3uJfS (Caused by ConnectTimeoutError(<urllib3.connection.HTTPSConnection object at 0x0000020A71FF6E30>, 'Connection to financialmodelingprep.com timed out. (connect timeout=10)'))
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "c:\Trading\data.py", line 564, in fetch_fmp_economic_calendar
+    response = requests.get(url, proxies=proxies, timeout=10).json()
+  File "c:\Trading\venv\lib\site-packages\requests\api.py", line 73, in get
+    return request("get", url, params=params, **kwargs)
+  File "c:\Trading\venv\lib\site-packages\requests\api.py", line 59, in request
+    return session.request(method=method, url=url, **kwargs)
+  File "c:\Trading\venv\lib\site-packages\requests\sessions.py", line 589, in request
+    resp = self.send(prep, **send_kwargs)
+  File "c:\Trading\venv\lib\site-packages\requests\sessions.py", line 703, in send
+    r = adapter.send(request, **kwargs)
+  File "c:\Trading\venv\lib\site-packages\requests\adapters.py", line 665, in send
+    raise ConnectTimeout(e, request=request)
+requests.exceptions.ConnectTimeout: HTTPSConnectionPool(host='financialmodelingprep.com', port=443): Max retries exceeded with url: /api/v3/economic-calendar?from=2025-05-13&to=2025-08-21&apikey=uUFGG1dA6jFHeFgf1XHNJpt4obL3uJfS (Caused by ConnectTimeoutError(<urllib3.connection.HTTPSConnection object at 0x0000020A71FF6E30>, 'Connection to financialmodelingprep.com timed out. (connect timeout=10)'))
+, proxies={}, url=https://financialmodelingprep.com/api/v3/economic-calendar?from=2025-05-13&to=2025-08-21&apikey=uUFGG1dA6jFHeFgf1XHNJpt4obL3uJfS
+2025-08-21 15:00:31,207 - INFO - data - Fetching FRED data: series_id=ECI, start=2025-05-13, end=2025-08-21, api_key_masked=81ffe...
+2025-08-21 15:00:31,207 - DEBUG - connectionpool - Starting new HTTPS connection (1): api.stlouisfed.org:443
+2025-08-21 15:00:36,258 - WARNING - data - Proxy test failed: {'http': 'http://proxy1.scig.gov.hk:8080'}, error=HTTPSConnectionPool(host='api.stlouisfed.org', port=443): Max retries exceeded with url: /fred/series/observations?series_id=FEDFUNDS&api_key=TEST&file_type=json (Caused by ConnectTimeoutError(<urllib3.connection.HTTPSConnection object at 0x0000020A71FF7D90>, 'Connection to api.stlouisfed.org timed out. (connect timeout=5)'))
+2025-08-21 15:00:36,258 - DEBUG - data - Detected proxies: {}
+2025-08-21 15:00:36,258 - DEBUG - connectionpool - Starting new HTTPS connection (1): api.stlouisfed.org:443
+2025-08-21 15:00:46,265 - ERROR - data - Failed to fetch FRED data: HTTPSConnectionPool(host='api.stlouisfed.org', port=443): Max retries exceeded with url: /fred/series/observations?series_id=ECI&api_key=81ffe6474ddf0bc54bb72e0f26918fcc&file_type=json&observation_start=2025-05-13&observation_end=2025-08-21 (Caused by ConnectTimeoutError(<urllib3.connection.HTTPSConnection object at 0x0000020A720C4670>, 'Connection to api.stlouisfed.org timed out. (connect timeout=10)')), traceback=Traceback (most recent call last):
+  File "c:\Trading\venv\lib\site-packages\urllib3\connection.py", line 198, in _new_conn
+    sock = connection.create_connection(
+  File "c:\Trading\venv\lib\site-packages\urllib3\util\connection.py", line 85, in create_connection
+    raise err
+  File "c:\Trading\venv\lib\site-packages\urllib3\util\connection.py", line 73, in create_connection
+    sock.connect(sa)
+TimeoutError: timed out
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "c:\Trading\venv\lib\site-packages\urllib3\connectionpool.py", line 787, in urlopen
+    response = self._make_request(
+  File "c:\Trading\venv\lib\site-packages\urllib3\connectionpool.py", line 488, in _make_request
+    raise new_e
+  File "c:\Trading\venv\lib\site-packages\urllib3\connectionpool.py", line 464, in _make_request
+    self._validate_conn(conn)
+  File "c:\Trading\venv\lib\site-packages\urllib3\connectionpool.py", line 1093, in _validate_conn
+    conn.connect()
+  File "c:\Trading\venv\lib\site-packages\urllib3\connection.py", line 753, in connect
+    self.sock = sock = self._new_conn()
+  File "c:\Trading\venv\lib\site-packages\urllib3\connection.py", line 207, in _new_conn
+    raise ConnectTimeoutError(
+urllib3.exceptions.ConnectTimeoutError: (<urllib3.connection.HTTPSConnection object at 0x0000020A71FF6E30>, 'Connection to financialmodelingprep.com timed out. (connect timeout=10)')
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "c:\Trading\venv\lib\site-packages\requests\adapters.py", line 644, in send
+    resp = conn.urlopen(
+  File "c:\Trading\venv\lib\site-packages\urllib3\connectionpool.py", line 841, in urlopen
+    retries = retries.increment(
+  File "c:\Trading\venv\lib\site-packages\urllib3\util\retry.py", line 519, in increment
+    raise MaxRetryError(_pool, url, reason) from reason  # type: ignore[arg-type]
+urllib3.exceptions.MaxRetryError: HTTPSConnectionPool(host='financialmodelingprep.com', port=443): Max retries exceeded with url: /api/v3/economic-calendar?from=2025-05-13&to=2025-08-21&apikey=uUFGG1dA6jFHeFgf1XHNJpt4obL3uJfS (Caused by ConnectTimeoutError(<urllib3.connection.HTTPSConnection object at 0x0000020A71FF6E30>, 'Connection to financialmodelingprep.com timed out. (connect timeout=10)'))
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "c:\Trading\data.py", line 564, in fetch_fmp_economic_calendar
+    response = requests.get(url, proxies=proxies, timeout=10).json()
+  File "c:\Trading\venv\lib\site-packages\requests\api.py", line 73, in get
+    return request("get", url, params=params, **kwargs)
+  File "c:\Trading\venv\lib\site-packages\requests\api.py", line 59, in request
+    return session.request(method=method, url=url, **kwargs)
+  File "c:\Trading\venv\lib\site-packages\requests\sessions.py", line 589, in request
+    resp = self.send(prep, **send_kwargs)
+  File "c:\Trading\venv\lib\site-packages\requests\sessions.py", line 703, in send
+    r = adapter.send(request, **kwargs)
+  File "c:\Trading\venv\lib\site-packages\requests\adapters.py", line 665, in send
+    raise ConnectTimeout(e, request=request)
+requests.exceptions.ConnectTimeout: HTTPSConnectionPool(host='financialmodelingprep.com', port=443): Max retries exceeded with url: /api/v3/economic-calendar?from=2025-05-13&to=2025-08-21&apikey=uUFGG1dA6jFHeFgf1XHNJpt4obL3uJfS (Caused by ConnectTimeoutError(<urllib3.connection.HTTPSConnection object at 0x0000020A71FF6E30>, 'Connection to financialmodelingprep.com timed out. (connect timeout=10)'))
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "c:\Trading\venv\lib\site-packages\urllib3\connection.py", line 198, in _new_conn
+    sock = connection.create_connection(
+  File "c:\Trading\venv\lib\site-packages\urllib3\util\connection.py", line 85, in create_connection
+    raise err
+  File "c:\Trading\venv\lib\site-packages\urllib3\util\connection.py", line 73, in create_connection
+    sock.connect(sa)
+TimeoutError: timed out
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "c:\Trading\venv\lib\site-packages\urllib3\connectionpool.py", line 787, in urlopen
+    response = self._make_request(
+  File "c:\Trading\venv\lib\site-packages\urllib3\connectionpool.py", line 488, in _make_request
+    raise new_e
+  File "c:\Trading\venv\lib\site-packages\urllib3\connectionpool.py", line 464, in _make_request
+    self._validate_conn(conn)
+  File "c:\Trading\venv\lib\site-packages\urllib3\connectionpool.py", line 1093, in _validate_conn
+    conn.connect()
+  File "c:\Trading\venv\lib\site-packages\urllib3\connection.py", line 753, in connect
+    self.sock = sock = self._new_conn()
+  File "c:\Trading\venv\lib\site-packages\urllib3\connection.py", line 207, in _new_conn
+    raise ConnectTimeoutError(
+urllib3.exceptions.ConnectTimeoutError: (<urllib3.connection.HTTPSConnection object at 0x0000020A720C4670>, 'Connection to api.stlouisfed.org timed out. (connect timeout=10)')
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "c:\Trading\venv\lib\site-packages\requests\adapters.py", line 644, in send
+    resp = conn.urlopen(
+  File "c:\Trading\venv\lib\site-packages\urllib3\connectionpool.py", line 841, in urlopen
+    retries = retries.increment(
+  File "c:\Trading\venv\lib\site-packages\urllib3\util\retry.py", line 519, in increment
+    raise MaxRetryError(_pool, url, reason) from reason  # type: ignore[arg-type]
+urllib3.exceptions.MaxRetryError: HTTPSConnectionPool(host='api.stlouisfed.org', port=443): Max retries exceeded with url: /fred/series/observations?series_id=ECI&api_key=81ffe6474ddf0bc54bb72e0f26918fcc&file_type=json&observation_start=2025-05-13&observation_end=2025-08-21 (Caused by ConnectTimeoutError(<urllib3.connection.HTTPSConnection object at 0x0000020A720C4670>, 'Connection to api.stlouisfed.org timed out. (connect timeout=10)'))
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "c:\Trading\data.py", line 213, in fetch_fred_data
+    response = requests.get(url, params=params, proxies=proxies, timeout=10).json()
+  File "c:\Trading\venv\lib\site-packages\requests\api.py", line 73, in get
+    return request("get", url, params=params, **kwargs)
+  File "c:\Trading\venv\lib\site-packages\requests\api.py", line 59, in request
+    return session.request(method=method, url=url, **kwargs)
+  File "c:\Trading\venv\lib\site-packages\requests\sessions.py", line 589, in request
+    resp = self.send(prep, **send_kwargs)
+  File "c:\Trading\venv\lib\site-packages\requests\sessions.py", line 703, in send
+    r = adapter.send(request, **kwargs)
+  File "c:\Trading\venv\lib\site-packages\requests\adapters.py", line 665, in send
+    raise ConnectTimeout(e, request=request)
+requests.exceptions.ConnectTimeout: HTTPSConnectionPool(host='api.stlouisfed.org', port=443): Max retries exceeded with url: /fred/series/observations?series_id=ECI&api_key=81ffe6474ddf0bc54bb72e0f26918fcc&file_type=json&observation_start=2025-05-13&observation_end=2025-08-21 (Caused by ConnectTimeoutError(<urllib3.connection.HTTPSConnection object at 0x0000020A720C4670>, 'Connection to api.stlouisfed.org timed out. (connect timeout=10)'))
+, series_id=ECI, proxies={}, url=https://api.stlouisfed.org/fred/series/observations
+2025-08-21 15:00:46,296 - ERROR - data - Local economic calendar invalid or empty: shape=(0, 3), columns=['date', 'event', 'impact']
+2025-08-21 15:00:46,296 - INFO - main - [BACKTEST] Economic calendar fetched: shape=empty
+2025-08-21 15:00:46,296 - INFO - main - [BACKTEST] Collecting 1h historical data...
+2025-08-21 15:00:46,312 - WARNING - data - Backtest period too short: 100 days, adjusting to 180 days
+2025-08-21 15:00:46,312 - INFO - data - Adjusted start_date to 2025-02-22 to meet minimum 180 days
+2025-08-21 15:00:46,327 - INFO - data - Loaded 1 hour data from cache, shape=(1, 6), columns=['date', 'open', 'high', 'low', 'close', 'volume']
+2025-08-21 15:00:46,327 - ERROR - data - Insufficient data: 1 rows, required at least 100
+2025-08-21 15:00:46,327 - INFO - main - [BACKTEST] 1h data collected: shape=empty
+2025-08-21 15:00:46,327 - INFO - main - [BACKTEST] Collecting 4h historical data...
+2025-08-21 15:00:46,327 - WARNING - data - Backtest period too short: 100 days, adjusting to 180 days
+2025-08-21 15:00:46,327 - INFO - data - Adjusted start_date to 2025-02-22 to meet minimum 180 days
+2025-08-21 15:00:46,327 - INFO - data - Loaded 4 hours data from cache, shape=(4, 6), columns=['date', 'open', 'high', 'low', 'close', 'volume']
+2025-08-21 15:00:46,327 - ERROR - data - Insufficient data: 4 rows, required at least 100
+2025-08-21 15:00:46,343 - INFO - main - [BACKTEST] 4h data collected: shape=empty
+2025-08-21 15:00:46,343 - INFO - main - [BACKTEST] Collecting 1d historical data...
+2025-08-21 15:00:46,343 - WARNING - data - Backtest period too short: 100 days, adjusting to 180 days
+2025-08-21 15:00:46,359 - INFO - data - Adjusted start_date to 2025-02-22 to meet minimum 180 days
+2025-08-21 15:00:46,359 - INFO - data - Loaded 1 day data from cache, shape=(1, 6), columns=['date', 'open', 'high', 'low', 'close', 'volume']
+2025-08-21 15:00:46,359 - ERROR - data - Insufficient data: 1 rows, required at least 100
+2025-08-21 15:00:46,359 - INFO - main - [BACKTEST] 1d data collected: shape=empty
+2025-08-21 15:00:46,359 - ERROR - main - [BACKTEST] Historical data is empty, cannot proceed with backtest
